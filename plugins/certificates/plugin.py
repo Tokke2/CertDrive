@@ -46,11 +46,16 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QInputDialog,
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -61,6 +66,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import labels as _labels
+from .customers import Customer, load_customers, save_customers
 from .view import (
     COPYRIGHT,
     EngineErrorWidget,
@@ -467,6 +473,8 @@ class Plugin:
         self.templates_path: Path | None = None
         self.output_path: Path | None = None
         self.config_path: Path | None = None
+        self.customers_path: Path | None = None
+        self._customers: list[Customer] = []
         self._counter_manager: Any | None = None
         self._pdf_converter: Any | None = None
         self._generator: Any | None = None
@@ -484,6 +492,10 @@ class Plugin:
         self._current_placeholders: list[str] = []
         self._generate_button: QPushButton | None = None
         self._batch_button: QPushButton | None = None
+        self._customer_combo: QComboBox | None = None
+        self._customer_print_checkbox: QCheckBox | None = None
+        self._pending_customer: Customer | None = None
+        self._pending_customer_label = False
         self._progress_bar: QProgressBar | None = None
         self._progress_label: QLabel | None = None
 
@@ -605,6 +617,7 @@ class Plugin:
         self.templates_path = self._context_path("templates", base / _TEMPLATE_ROOT_NAME)
         self.output_path = self._context_path("output", base / _OUTPUT_ROOT_NAME)
         self.config_path = self._context_path("config", base / _CONFIG_ROOT_NAME)
+        self.customers_path = self.config_path / "customers.json"
         self.templates_path = self._diagnose_templates_path(base, self.templates_path)
 
         for path in (self.templates_path, self.output_path, self.config_path):
@@ -614,6 +627,13 @@ class Plugin:
                 self._log.error("[CERTIFICATES] Kunde inte skapa %s: %s", path, exc)
                 self._evt("cert.path_failed", f"Kunde inte skapa {path}: {exc}",
                           level=logging.ERROR, path=str(path), error=str(exc))
+        try:
+            self._customers = load_customers(self.customers_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self._customers = []
+            self._log.error("[CERTIFICATES] Kundregistret kunde inte läsas: %s", exc)
+            self._evt("customer.load_failed", f"Kundregistret kunde inte läsas: {exc}",
+                      level=logging.ERROR, path=str(self.customers_path), error=str(exc))
 
     def _context_path(self, key: str, fallback: Path) -> Path:
         context = self._context
@@ -1067,6 +1087,7 @@ class Plugin:
         outer.setSpacing(self._sp(8))
         outer.addWidget(self._build_status_row())
         outer.addWidget(self._build_template_selector())
+        outer.addWidget(self._build_customer_row())
         outer.addWidget(self._build_template_info())
         outer.addWidget(self._build_fields_section(), stretch=1)
         outer.addWidget(self._build_action_row())
@@ -1118,6 +1139,179 @@ class Plugin:
         open_templates.clicked.connect(self._open_templates_folder)
         layout.addWidget(open_templates)
         return frame
+
+    def _build_customer_row(self) -> QWidget:
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(self._sp(10), self._sp(5), self._sp(10), self._sp(5))
+        layout.setSpacing(self._sp(7))
+        layout.addWidget(QLabel("👤 Kund:", frame))
+
+        self._customer_combo = QComboBox(frame)
+        self._customer_combo.setMinimumHeight(self._sp(32))
+        self._customer_combo.setMinimumWidth(self._sp(180))
+        self._customer_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._customer_combo.currentIndexChanged.connect(self._on_customer_changed)
+        layout.addWidget(self._customer_combo, stretch=1)
+
+        manage = QPushButton("Hantera kunder…", frame)
+        manage.setMinimumHeight(self._sp(32))
+        manage.clicked.connect(self._manage_customers)
+        layout.addWidget(manage)
+
+        self._customer_print_checkbox = QCheckBox("Skriv kundetikett automatiskt", frame)
+        self._customer_print_checkbox.setToolTip(
+            "Skriv ut en etikett för vald kund direkt efter att intyget har skapats."
+        )
+        self._customer_print_checkbox.setEnabled(False)
+        layout.addWidget(self._customer_print_checkbox)
+        self._refresh_customer_combo()
+        return frame
+
+    def _refresh_customer_combo(self, selected_id: str | None = None) -> None:
+        combo = self._customer_combo
+        if combo is None:
+            return
+        if selected_id is None and combo.currentData():
+            selected_id = str(combo.currentData())
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Välj kund…", None)
+        for customer in self._customers:
+            combo.addItem(customer.name, customer.customer_id)
+        index = combo.findData(selected_id) if selected_id else -1
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+        self._on_customer_changed()
+
+    def _selected_customer(self) -> Customer | None:
+        combo = self._customer_combo
+        customer_id = str(combo.currentData() or "") if combo is not None else ""
+        return next((customer for customer in self._customers
+                     if customer.customer_id == customer_id), None)
+
+    @Slot()
+    def _on_customer_changed(self, *_args: object) -> None:
+        selected = self._selected_customer()
+        checkbox = self._customer_print_checkbox
+        if checkbox is None:
+            return
+        has_labels = bool(_labels.find_labels(_labels.label_folder(self.templates_path)))
+        bpac_ready = _labels.bpac_available()
+        can_print = bool(selected and has_labels and bpac_ready)
+        checkbox.setEnabled(can_print)
+        if can_print:
+            tip = "Skriv ut en etikett för vald kund direkt efter att intyget har skapats."
+        elif not selected:
+            tip = "Välj en kund först."
+        elif not has_labels:
+            tip = "Lägg minst en .lbx-mall i mappen Etiketter/."
+        else:
+            tip = "Automatisk utskrift kräver Windows och Brother b-PAC."
+        checkbox.setToolTip(tip)
+        if selected is None:
+            checkbox.setChecked(False)
+
+    @Slot()
+    def _manage_customers(self) -> None:
+        actions = ["➕ Lägg till kund"]
+        actions.extend(f"✏️ Redigera #{index + 1}: {customer.name}"
+                       for index, customer in enumerate(self._customers))
+        actions.extend(f"🗑️ Ta bort #{index + 1}: {customer.name}"
+                       for index, customer in enumerate(self._customers))
+        action, accepted = QInputDialog.getItem(
+            self._tab_widget, "Kundregister", "Välj åtgärd:", actions, 0, False
+        )
+        if not accepted:
+            return
+        if action == actions[0]:
+            self._edit_customer_dialog()
+            return
+        try:
+            number = int(action.split("#", 1)[1].split(":", 1)[0]) - 1
+        except (IndexError, ValueError):
+            return
+        if action.startswith("✏️") and 0 <= number < len(self._customers):
+            self._edit_customer_dialog(self._customers[number])
+        elif action.startswith("🗑️") and 0 <= number < len(self._customers):
+            customer = self._customers[number]
+            answer = QMessageBox.question(
+                self._tab_widget, "Ta bort kund",
+                f"Vill du ta bort {customer.name} från kundregistret?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                previous = self._customers
+                self._customers = [item for item in previous
+                                   if item.customer_id != customer.customer_id]
+                if self._persist_customers():
+                    self._refresh_customer_combo()
+                else:
+                    self._customers = previous
+
+    def _edit_customer_dialog(self, customer: Customer | None = None) -> None:
+        dialog = QDialog(self._tab_widget)
+        dialog.setWindowTitle("Redigera kund" if customer else "Lägg till kund")
+        dialog.setMinimumWidth(self._sp(390))
+        form = QFormLayout(dialog)
+        fields: dict[str, QLineEdit] = {}
+        for key, title, value in (
+            ("name", "Kundnamn *", customer.name if customer else ""),
+            ("address", "Adress", customer.address if customer else ""),
+            ("postal_code", "Postnummer", customer.postal_code if customer else ""),
+            ("city", "Postort", customer.city if customer else ""),
+            ("phone", "Telefon", customer.phone if customer else ""),
+            ("email", "E-post", customer.email if customer else ""),
+        ):
+            entry = QLineEdit(value, dialog)
+            entry.setClearButtonEnabled(True)
+            fields[key] = entry
+            form.addRow(title, entry)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            saved = Customer.create(
+                *(fields[key].text() for key in
+                  ("name", "address", "postal_code", "city", "phone", "email")),
+                customer_id=customer.customer_id if customer else None,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self._tab_widget, "Kunduppgifter", str(exc))
+            return
+        previous = self._customers
+        if customer:
+            self._customers = [saved if item.customer_id == customer.customer_id else item
+                               for item in previous]
+        else:
+            self._customers = [*previous, saved]
+        self._customers.sort(key=lambda item: item.name.casefold())
+        if self._persist_customers():
+            self._refresh_customer_combo(saved.customer_id)
+        else:
+            self._customers = previous
+
+    def _persist_customers(self) -> bool:
+        if self.customers_path is None:
+            return False
+        try:
+            save_customers(self.customers_path, self._customers)
+        except OSError as exc:
+            self._log.exception("[CERTIFICATES] Kundregistret kunde inte sparas")
+            self._evt("customer.save_failed", f"Kundregistret kunde inte sparas: {exc}",
+                      level=logging.ERROR, path=str(self.customers_path), error=str(exc))
+            QMessageBox.critical(self._tab_widget, "Kundregister", f"Kunderna kunde inte sparas:\n{exc}")
+            return False
+        self._evt("customer.saved", f"Kundregister sparat ({len(self._customers)} kunder)",
+                  count=len(self._customers))
+        return True
 
     def _build_template_info(self) -> QWidget:
         frame = QFrame()
@@ -1526,6 +1720,11 @@ class Plugin:
                   template=name, fields=len(values))
         self._emit_event("certificate.before_generate", {"template": name, "values": values})
         self._last_values = dict(values)  # 10.4.0: till etikettfält
+        self._pending_customer = self._selected_customer()
+        self._pending_customer_label = bool(
+            self._pending_customer and self._customer_print_checkbox
+            and self._customer_print_checkbox.isChecked()
+        )
         worker = _GenerationWorker(generator, template, values)
         worker.signals.progress.connect(self._on_generation_progress, Qt.ConnectionType.QueuedConnection)
         worker.signals.finished.connect(self._on_generation_finished, Qt.ConnectionType.QueuedConnection)
@@ -1580,6 +1779,8 @@ class Plugin:
         self._show_progress(False)
         self._restore_action_buttons()
         if not _result_is_success(result):
+            self._pending_customer = None
+            self._pending_customer_label = False
             error = str(_result_value(result, "error", "Okänt fel"))
             QMessageBox.critical(self._tab_widget, "Genereringsfel", error)
             self._log.error("[CERTIFICATES] Genereringsfel: %s", error)
@@ -1631,24 +1832,43 @@ class Plugin:
             {"title": "Intyg skapat", "message": f"#{number} – {name}"},
         )
 
-        # 10.4.0: rutan erbjuder även postetikett (QL-500) om Etiketter/ har .lbx
+        # Erbjud etikett till vald kund, eller behåll den generiska postetiketten.
+        customer = self._pending_customer
+        automatic_customer_label = self._pending_customer_label
+        self._pending_customer = None
+        self._pending_customer_label = False
         box = QMessageBox(self._tab_widget)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle("Intyg skapat")
-        box.setText(
+        message = (
             f"✅ Intyg #{number} skapades.\n\n📄 {filename}\n📑 {pages} sidor\n⏱️ {duration:.1f}s"
         )
+        if automatic_customer_label and customer is not None:
+            message += f"\n\n🏷️ Kundetikett för {customer.name} skrivs ut."
+        box.setText(message)
         open_button = box.addButton("📄 Öppna PDF", QMessageBox.ButtonRole.AcceptRole)
         label_button = None
-        if _labels.find_labels(_labels.label_folder(self.templates_path)):
-            label_button = box.addButton("🏷️ Skriv postetikett", QMessageBox.ButtonRole.ActionRole)
+        if not automatic_customer_label and _labels.find_labels(_labels.label_folder(self.templates_path)):
+            if customer is not None:
+                label_button = box.addButton(
+                    f"🏷️ Etikett till {customer.name}", QMessageBox.ButtonRole.ActionRole
+                )
+            else:
+                label_button = box.addButton(
+                    "🏷️ Skriv postetikett", QMessageBox.ButtonRole.ActionRole
+                )
         box.addButton("Stäng", QMessageBox.ButtonRole.RejectRole)
         box.exec()
         clicked = box.clickedButton()
         if clicked is open_button and output_path:
             self._open_path(Path(str(output_path)))
+        if automatic_customer_label and customer is not None:
+            self._start_customer_label_print(customer)
         elif label_button is not None and clicked is label_button:
-            self._print_label_dialog()
+            if customer is not None:
+                self._start_customer_label_print(customer)
+            else:
+                self._print_label_dialog()
 
     # ── Postetiketter (QL-500 via b-PAC) ─────────────────────────────────
 
@@ -1690,10 +1910,34 @@ class Plugin:
         if not ok:
             self._evt("label.cancelled", "Etikettutskrift avbruten", level=logging.DEBUG)
             return
+        self._start_label_print(chosen, copies, dict(self._last_values))
+
+    def _start_customer_label_print(self, customer: Customer) -> None:
+        labels = _labels.find_labels(_labels.label_folder(self.templates_path))
+        if not labels:
+            QMessageBox.warning(
+                self._tab_widget, "Kundetikett", "Ingen etikettmall (.lbx) hittades i mappen Etiketter/."
+            )
+            return
+        if not _labels.bpac_available():
+            QMessageBox.warning(
+                self._tab_widget, "Brother b-PAC saknas",
+                "Automatisk kundetikett kräver Windows, Brother b-PAC och en installerad "
+                "Brother-skrivare.\n\nHämta b-PAC här:\n" + _labels.BPAC_DOWNLOAD_URL,
+            )
+            return
+        chosen = labels[0]
+        values = dict(self._last_values)
+        values.update(customer.label_values())
+        self._evt("label.customer_print_started", f"Kundetikett startad: {customer.name}",
+                  customer_id=customer.customer_id, label=chosen.name)
+        self._start_label_print(chosen, 1, values)
+
+    def _start_label_print(self, chosen: Path, copies: int, values: dict[str, str]) -> None:
         self._evt("label.print_started", f"Skriver ut {copies} × {chosen.name}",
                   label=chosen.name, copies=copies)
         self._set_status(f"🏷️ Skriver ut {copies} etikett(er)…")
-        worker = _LabelWorker(chosen, copies, dict(self._last_values))
+        worker = _LabelWorker(chosen, copies, values)
         worker.signals.finished.connect(self._on_label_finished, Qt.ConnectionType.QueuedConnection)
         worker.signals.error.connect(
             lambda error: self._on_label_finished(_labels.LabelResult(False, chosen.name, copies, error=error)),
@@ -1718,6 +1962,8 @@ class Plugin:
 
     @Slot(str)
     def _on_generation_error(self, error: str) -> None:
+        self._pending_customer = None
+        self._pending_customer_label = False
         self._show_progress(False)
         self._restore_action_buttons()
         QMessageBox.critical(self._tab_widget, "Oväntat genereringsfel", error)
