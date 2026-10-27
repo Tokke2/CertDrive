@@ -1,0 +1,88 @@
+{
+  "advanced": {
+    "cache_enabled": true,
+    "debug_mode": false,
+    "log_level": "INFO",
+    "log_retention_days": 30,
+    "max_log_size_mb": 10,
+    "parallel_jobs": 2
+  },
+  "app": {
+    "autostart": false,
+    "check_updates": false,
+    "close_to_tray": true,
+    "confirm_exit": true,
+    "language": "sv",
+    "minimize_to_tray": true,
+    "show_notifications": true,
+    "single_click_open": true,
+    "start_minimized": true,
+    "start_with_os": false,
+    "theme": "auto",
+    "tray": {
+      "minimize_to_tray": true,
+      "show_notifications": true,
+      "single_click_open": true,
+      "start_minimized": false
+    }
+  },
+  "backup": {
+    "auto_backup": true,
+    "backup_interval_days": 7,
+    "include_logs": false,
+    "include_output": false,
+    "max_backups": 10
+  },
+  "certificates": {
+    "counters": {}
+  },
+  "general": {
+    "animation_enabled": true,
+    "font_size": 10,
+    "language": "sv",
+    "remember_window": true,
+    "show_tooltips": true,
+    "theme": "system"
+  },
+  "generator": {
+    "auto_open_pdf": false,
+    "company_address": "",
+    "company_email": "",
+    "company_name": "",
+    "company_org_number": "",
+    "company_phone": "",
+    "minimize_to_tray": true,
+    "show_notifications": true,
+    "start_minimized": true,
+    "start_with_os": false
+  },
+  "logging": {
+    "level": "INFO",
+    "max_files": 30
+  },
+  "notifications": {
+    "duration_seconds": 5,
+    "enabled": true,
+    "on_complete": true,
+    "on_error": true
+  },
+  "pdf": {
+    "compress_output": false,
+    "converter": "auto",
+    "dpi": 150,
+    "embed_fonts": true,
+    "open_after_generate": true
+  },
+  "ui": {
+    "font_size": 10,
+    "hidden_tabs": []
+  },
+  "window": {
+    "height": 750,
+    "last_tab": 5,
+    "maximized": false,
+    "width": 1100,
+    "x": 218,
+    "y": 37
+  }
+}

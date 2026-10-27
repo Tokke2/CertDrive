@@ -1,0 +1,150 @@
+{
+  "advanced": {
+    "cache_enabled": true,
+    "debug_mode": false,
+    "log_level": "INFO",
+    "log_retention_days": 30,
+    "max_log_size_mb": 10,
+    "parallel_jobs": 2
+  },
+  "app": {
+    "autostart": false,
+    "check_updates": false,
+    "close_to_tray": true,
+    "confirm_exit": true,
+    "language": "sv",
+    "minimize_to_tray": true,
+    "show_notifications": true,
+    "single_click_open": true,
+    "start_minimized": true,
+    "start_with_os": false,
+    "theme": "system",
+    "tray": {
+      "minimize_to_tray": true,
+      "show_notifications": true,
+      "single_click_open": true,
+      "start_minimized": false
+    }
+  },
+  "backup": {
+    "auto_backup": true,
+    "backup_interval_days": 7,
+    "include_logs": false,
+    "include_output": false,
+    "last_auto_backup": "2026-10-19T08:55:29",
+    "max_backups": 10
+  },
+  "certificates": {
+    "counters": {
+      "35kW": 1111,
+      "Passagerare": 845
+    }
+  },
+  "general": {
+    "animation_enabled": true,
+    "font_size": 10,
+    "language": "sv",
+    "remember_window": true,
+    "show_tooltips": true,
+    "theme": "system"
+  },
+  "generator": {
+    "auto_open_pdf": false,
+    "company_address": "",
+    "company_email": "",
+    "company_name": "",
+    "company_org_number": "",
+    "company_phone": "",
+    "minimize_to_tray": true,
+    "show_notifications": true,
+    "start_minimized": true,
+    "start_with_os": false
+  },
+  "logging": {
+    "level": "INFO",
+    "max_files": 30
+  },
+  "metadata": {
+    "copyright": "© Rickard Längkvist 2025–2026"
+  },
+  "mode": "dev",
+  "notifications": {
+    "duration_seconds": 5,
+    "enabled": true,
+    "on_complete": true,
+    "on_error": true
+  },
+  "pdf": {
+    "compress_output": false,
+    "converter": "auto",
+    "dpi": 150,
+    "embed_fonts": true,
+    "open_after_generate": true
+  },
+  "smart_cache": true,
+  "tray": {
+    "recent_certificates": [
+      {
+        "created": "2026-10-21T13:48:28.991112",
+        "created_at": "2026-10-21T13:48:28.991112",
+        "name": "845 Intyg Passagerare 5HD1YWA40SS038263 CUE02F 2026-10-21.pdf",
+        "number": 845,
+        "path": "D:\\Program\\Intyg\\Out\\Passagerare\\845 Intyg Passagerare 5HD1YWA40SS038263 CUE02F 2026-10-21.pdf",
+        "template": "Passagerare"
+      },
+      {
+        "created": "2026-10-19T09:02:51.030912",
+        "created_at": "2026-10-19T09:02:51.030912",
+        "name": "844 Intyg Passagerare 5HD1YWA40SS033709 JCA12B 2026-10-19.pdf",
+        "number": 844,
+        "path": "D:\\Program\\Intyg\\Out\\Passagerare\\844 Intyg Passagerare 5HD1YWA40SS033709 JCA12B 2026-10-19.pdf",
+        "template": "Passagerare"
+      },
+      {
+        "created": "2026-09-28T10:34:16.843228",
+        "created_at": "2026-09-28T10:34:16.843228",
+        "name": "843 Intyg Passagerare 5HD1BVJ46PS011328 JTY79E 2026-09-28.pdf",
+        "number": 843,
+        "path": "D:\\Program\\Intyg\\Out\\Passagerare\\843 Intyg Passagerare 5HD1BVJ46PS011328 JTY79E 2026-09-28.pdf",
+        "template": "Passagerare"
+      },
+      {
+        "created": "2026-09-28T10:20:41.246028",
+        "created_at": "2026-09-28T10:20:41.246028",
+        "name": "842 Intyg Passagerare 5HD1YWA45SS032989 OTF61Y 2026-09-28.pdf",
+        "number": 842,
+        "path": "D:\\Program\\Intyg\\Out\\Passagerare\\842 Intyg Passagerare 5HD1YWA45SS032989 OTF61Y 2026-09-28.pdf",
+        "template": "Passagerare"
+      },
+      {
+        "created": "2026-09-28T08:48:32.370989",
+        "created_at": "2026-09-28T08:48:32.370989",
+        "name": "841 Intyg Passagerare 5HD1YWA41SS039034 FXE73D 2026-09-28.pdf",
+        "number": 841,
+        "path": "D:\\Program\\Intyg\\Out\\Passagerare\\841 Intyg Passagerare 5HD1YWA41SS039034 FXE73D 2026-09-28.pdf",
+        "template": "Passagerare"
+      },
+      {
+        "created": "2026-09-28T08:18:03.558078",
+        "created_at": "2026-09-28T08:18:03.558078",
+        "name": "840 Intyg Passagerare 5HD1TL840TS953909 DUF14M 2026-09-28.pdf",
+        "number": 840,
+        "path": "D:\\Program\\Intyg\\Out\\Passagerare\\840 Intyg Passagerare 5HD1TL840TS953909 DUF14M 2026-09-28.pdf",
+        "template": "Passagerare"
+      }
+    ]
+  },
+  "ui": {
+    "font_size": 10,
+    "hidden_tabs": []
+  },
+  "window": {
+    "height": 748,
+    "hidden_tabs": [],
+    "last_tab": 0,
+    "maximized": true,
+    "width": 1098,
+    "x": -1466,
+    "y": 127
+  }
+}

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Intyg — dokument med sigill och bock</title>
+  <defs>
+    <linearGradient id="doc" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dbeafe"/>
+    </linearGradient>
+    <linearGradient id="seal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+
+    </linearGradient>
+  </defs>
+  <g>
+    <path d="M40 18 h108 l40 40 v180 a0 0 0 0 1 0 0 H40 a0 0 0 0 1 0 0 V18 a0 0 0 0 1 0 0 z" fill="url(#doc)"/>
+    <path d="M148 18 l40 40 h-40 z" fill="#93c5fd"/>
+    <path d="M40 18 h108 l40 40 v180 H40 z" fill="none" stroke="#1e40af" stroke-width="8" stroke-linejoin="round"/>
+    <path d="M148 18 v40 h40" fill="none" stroke="#1e40af" stroke-width="8" stroke-linejoin="round"/>
+    <path d="M40 18 h108 l40 40 v144 H40 Z" fill="none" stroke="#1e40af" stroke-width="0"/>
+    <g>
+      <circle cx="176" cy="176" r="56" fill="url(#seal)" stroke="#ffffff" stroke-width="8"/>
+      <path d="M150 176 l18 18 l36 -38" fill="none" stroke="#ffffff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <g fill="#1e40af" opacity="0.85">
+      <rect x="62" y="78" width="86" height="10" rx="5"/>
+      <rect x="62" y="100" width="66" height="10" rx="5"/>
+      <rect x="62" y="122" width="52" height="10" rx="5"/>
+    </g>
+  </g>
+</svg>
