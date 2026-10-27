@@ -9,7 +9,7 @@
   },
   "app": {
     "autostart": false,
-    "check_updates": false,
+    "check_updates": true,
     "close_to_tray": true,
     "confirm_exit": true,
     "language": "sv",

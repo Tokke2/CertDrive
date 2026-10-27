@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # plugins/system_tray/models.py
 # Sökväg: Intygsgenerator/plugins/system_tray/models.py
-# Intygsgenerator — Datamodeller, enums, konstanter och ikonhjälpare
+# IntygsDrive — Datamodeller, enums, konstanter och ikonhjälpare
 # för system_tray-pluginet.
 #
 # Version: 9.0.0
@@ -508,15 +508,15 @@ class TabInfo:
 # ─── Tooltips ────────────────────────────────────────────────────────────────
 
 
-def get_tooltip_normal(app_name: str = "Intygsgenerator") -> str:
+def get_tooltip_normal(app_name: str = "IntygsDrive") -> str:
     return f"{app_name} - Klicka för att öppna"
 
 
-def get_tooltip_minimized(app_name: str = "Intygsgenerator") -> str:
+def get_tooltip_minimized(app_name: str = "IntygsDrive") -> str:
     return f"{app_name} - Körs i bakgrunden"
 
 
-def get_tooltip_busy(app_name: str = "Intygsgenerator") -> str:
+def get_tooltip_busy(app_name: str = "IntygsDrive") -> str:
     return f"{app_name} - Arbetar..."
 
 

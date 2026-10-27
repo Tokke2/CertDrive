@@ -389,7 +389,7 @@ def _atomic_write(path: Path, content: str) -> None:
 
 def export_text(path: Path | str, entries: list[LogEntry], session_id: str, stats: Any) -> bool:
     lines = [
-        f"Intygsgenerator loggexport {datetime.now().isoformat(timespec='seconds')}",
+        f"IntygsDrive loggexport {datetime.now().isoformat(timespec='seconds')}",
         f"Session: {session_id} │ Poster: {len(entries)}",
         "=" * 72,
     ]

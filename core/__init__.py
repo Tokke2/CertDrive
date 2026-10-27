@@ -5,7 +5,7 @@ from __future__ import annotations
 # Intygsgenerator — Kärnarkitektur: EventBus, IPlugin, AppContext,
 # PluginManager, TabManager samt re-export av core/config.py.
 #
-# Version: 10.1.0
+# Appversion: 0.0.1
 # © Rickard Längkvist 2025–2026
 #
 # Beroenden: Python 3.12+, core/config.py mjukt.
@@ -29,11 +29,11 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
-__version__: str = "10.8.0"
+__version__: str = "0.0.1"
 __author__: str = "Rickard Längkvist"
 
 APP_NAME: str = "Intygsgenerator"
-APP_DISPLAY_NAME: str = "Intygs Generator"
+APP_DISPLAY_NAME: str = "IntygsDrive"
 VERSION: str = __version__
 
 FOLDER_PLUGINS: str = "plugins"

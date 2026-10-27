@@ -4,7 +4,7 @@ from __future__ import annotations
 Fil:    plugins/settings/plugin.py
 Sökväg: Intygsgenerator/plugins/settings/plugin.py
 
-Intygsgenerator — centrala PySide6-inställningar: 12 flikar, teman, genvägar,
+IntygsDrive — centrala PySide6-inställningar: 12 flikar, teman, genvägar,
 profiler, backup/restore, diagnostik samt import/export av JSON-inställningar.
 Fil-I/O för backup körs av workers.py och återanvändbar UI ligger i view.py.
 """
@@ -371,7 +371,7 @@ class Plugin:
     priority: int = PLUGIN_PRIORITY
 
     SETTING_DEFINITIONS: list[SettingDefinition] = [
-        SettingDefinition("app.autostart", "Starta med operativsystemet", "Startar programmet automatiskt vid datorstart", "bool", False, section="startup", tooltip="Registrerar programmet i operativsystemets autostart."),
+        SettingDefinition("app.start_with_os", "Starta med operativsystemet", "Startar programmet automatiskt vid datorstart", "bool", False, section="startup", tooltip="Registrerar programmet i operativsystemets autostart."),
         SettingDefinition("app.tray.minimize_to_tray", "Minimera till systemfältet", "Dölj fönstret i stället för att avsluta vid X.", "bool", True, section="startup", icon="📥"),
         SettingDefinition("app.tray.start_minimized", "Starta minimerad", "Starta programmet i systemfältet.", "bool", True, section="startup", icon="🔽"),
         SettingDefinition("app.tray.show_notifications", "Visa tray-notifieringar", "Visa notifieringar från systemfältet.", "bool", True, section="startup", icon="🔔"),
@@ -393,6 +393,8 @@ class Plugin:
         SettingDefinition("backup.max_backups", "Max antal backups", "Antal backups som behålls.", "int", 10, min_value=1, max_value=100, section="backup"),
         SettingDefinition("backup.include_logs", "Inkludera loggar", "Ta med loggfiler i backup.", "bool", False, section="backup", icon="📝"),
         SettingDefinition("backup.include_output", "Inkludera genererade filer", "Ta med PDF-filer från Out i backup.", "bool", False, section="backup", icon="📁"),
+        SettingDefinition("backup.include_templates", "Inkludera mallar", "Ta med Mallar-mappen i backup.", "bool", True, section="backup", icon="📄"),
+        SettingDefinition("backup.include_statistics", "Inkludera intygsstatistik", "Ta med statistikfilen med intygsposter.", "bool", True, section="backup", icon="📊"),
         SettingDefinition("notifications.enabled", "Aktivera notifikationer", "Visa appnotifikationer.", "bool", True, section="notifications", icon="🔔"),
         SettingDefinition("notifications.on_complete", "Vid färdigt intyg", "Notifiera när intyg skapats.", "bool", True, section="notifications", icon="✅", depends_on="notifications.enabled"),
         SettingDefinition("notifications.on_error", "Vid fel", "Notifiera vid fel och varningar.", "bool", True, section="notifications", icon="❌", depends_on="notifications.enabled"),
@@ -651,6 +653,8 @@ class Plugin:
         return self._setting_get(key, default)
 
     def set_setting(self, key: str, value: Any, validate: bool = True) -> tuple[bool, str]:
+        if key == "app.autostart":
+            key = "app.start_with_os"
         definition = self._definitions.get(key)
         if validate and definition is not None:
             valid, error = definition.validate(value)
@@ -669,10 +673,11 @@ class Plugin:
         return True, ""
 
     def _handle_special_setting(self, key: str, value: Any, _old_value: Any) -> None:
-        if key == "app.autostart":
+        if key in {"app.start_with_os", "app.autostart"}:
             actual = self._autostart_manager.set_enabled(bool(value))
-            if actual != bool(value):
-                self._setting_set(key, actual)
+            self._setting_set("app.start_with_os", actual)
+            # Keep the old key synchronized for configs saved by prior versions.
+            self._setting_set("app.autostart", actual)
             self._update_autostart_status()
         elif key.startswith("app.tray."):
             self._sync_tray()
@@ -695,8 +700,9 @@ class Plugin:
 
     def _sync_autostart(self) -> None:
         actual = self._autostart_manager.sync()
-        saved = bool(self.get_setting("app.autostart", False))
+        saved = bool(self.get_setting("app.start_with_os", False))
         if actual != saved:
+            self._setting_set("app.start_with_os", actual)
             self._setting_set("app.autostart", actual)
 
     def _sync_tray(self) -> None:
@@ -800,7 +806,9 @@ class Plugin:
         options = BackupOptions(
             include_logs=bool(self.get_setting("backup.include_logs", False) if include_logs is None else include_logs),
             include_output=bool(self.get_setting("backup.include_output", False) if include_output is None else include_output),
-            app_version=self.version,
+            include_templates=bool(self.get_setting("backup.include_templates", True)),
+            include_statistics=bool(self.get_setting("backup.include_statistics", True)),
+            app_version="0.0.1",
         )
         worker = BackupWorker(self.backup_path, self._context, options, self.profiles_path if self.profiles_path and self.profiles_path.is_dir() else None)
         worker.signals.progress.connect(self._on_backup_progress, Qt.ConnectionType.QueuedConnection)
@@ -1080,7 +1088,7 @@ class Plugin:
         self._update_autostart_status()
         tray_box = tab.add_section("📥 Systemfält", "Bestäm hur huvudfönstret beter sig tillsammans med tray-pluginet.")
         for definition in self._definitions_for_section("startup"):
-            if definition.key != "app.autostart":
+            if definition.key != "app.start_with_os":
                 self._add_setting_widget(tray_box.layout(), definition)
         quit_box = tab.add_section("🚪 Avsluta program", "Avslut sker alltid från meny eller denna knapp.")
         quit_box.layout().addWidget(make_button_row(make_action_button("🚪 Avsluta programmet helt", self._handle_quit_request, quit_box), parent=quit_box))
@@ -1141,7 +1149,7 @@ class Plugin:
             make_action_button("📂 Öppna mapp", lambda: PlatformHelper.open_folder(self.backup_path) if self.backup_path else None, actions),
             parent=actions,
         ))
-        options = tab.add_section("Automatisk backup")
+        options = tab.add_section("Backupinnehåll och automatisk backup")
         for definition in self._definitions_for_section("backup"):
             self._add_setting_widget(options.layout(), definition)
         list_box = tab.add_section("Tillgängliga backups")
@@ -1213,8 +1221,8 @@ class Plugin:
         info_box.layout().addWidget(make_button_row(make_action_button("📋 Kopiera info", self._copy_system_info, info_box), parent=info_box))
 
     def _build_about_tab(self, tab: SettingsScrollTab) -> None:
-        box = tab.add_section("ℹ️ Om Intygsgenerator")
-        title = QLabel("Intygsgenerator", box)
+        box = tab.add_section("ℹ️ Om IntygsDrive")
+        title = QLabel("IntygsDrive", box)
         title_font = title.font()
         title_font.setBold(True)
         title_font.setPointSize(title_font.pointSize() + 6)
@@ -1349,7 +1357,7 @@ class Plugin:
         checkbox.blockSignals(True)
         checkbox.setChecked(actual)
         checkbox.blockSignals(False)
-        self.set_setting("app.autostart", actual)
+        self.set_setting("app.start_with_os", actual)
         self._update_autostart_status()
 
     def _update_autostart_status(self) -> None:
@@ -1552,7 +1560,7 @@ class Plugin:
     @Slot()
     def _handle_quit_request(self) -> None:
         if self.get_setting("app.confirm_exit", True):
-            answer = QMessageBox.question(self._shell, "Avsluta Intygsgenerator", "Vill du avsluta programmet helt?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            answer = QMessageBox.question(self._shell, "Avsluta IntygsDrive", "Vill du avsluta programmet helt?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self._emit("app.quit_confirmed", {})
@@ -1568,7 +1576,7 @@ class Plugin:
     @Slot()
     def _copy_diagnostics_report(self) -> None:
         lines = [
-            "INTYGSGENERATOR DIAGNOSTIK",
+            "INTYGSDRIVE DIAGNOSTIK",
             "=" * 48,
             COPYRIGHT,
             f"Settings Plugin: v{self.version}",
@@ -1583,7 +1591,7 @@ class Plugin:
     @Slot()
     def _copy_system_info(self) -> None:
         text = "\n".join(
-            [f"INTYGSGENERATOR SETTINGS v{self.version}", COPYRIGHT, ""]
+            [f"INTYGSDRIVE SETTINGS v{self.version}", COPYRIGHT, ""]
             + [f"{key}: {value}" for key, value in self.get_system_info().items()]
         )
         self._copy_to_clipboard(text, "✅ Systeminformation kopierad till urklipp")

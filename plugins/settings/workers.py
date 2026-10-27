@@ -40,7 +40,9 @@ COPYRIGHT: str = (
 _logger: logging.Logger = logging.getLogger(__name__)
 _MAX_LOG_FILE_BYTES: int = 50_000_000
 _MAX_RESTORE_FILE_BYTES: int = 500_000_000
-_ALLOWED_RESTORE_ROOTS: frozenset[str] = frozenset({"config", "Mallar", "profiles"})
+_ALLOWED_RESTORE_ROOTS: frozenset[str] = frozenset({
+    "config", "Mallar", "profiles", "statistics-legacy",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +51,9 @@ class BackupOptions:
 
     include_logs: bool = False
     include_output: bool = False
-    app_version: str = __version__
+    include_templates: bool = True
+    include_statistics: bool = True
+    app_version: str = "0.0.1"
 
 
 class WorkerSignals(QObject):
@@ -150,6 +154,8 @@ class BackupWorker(QRunnable):
                             "version": self._options.app_version,
                             "include_logs": self._options.include_logs,
                             "include_output": self._options.include_output,
+                            "include_templates": self._options.include_templates,
+                            "include_statistics": self._options.include_statistics,
                             "platform": os.name,
                             "copyright": COPYRIGHT,
                         },
@@ -195,11 +201,26 @@ class BackupWorker(QRunnable):
         templates_path = _context_path(self._context, "templates")
         logs_path = _context_path(self._context, "logs")
         output_path = _context_path(self._context, "output")
+        base_value = getattr(self._context, "base_path", None)
+        base_path = Path(base_value) if base_value else None
 
         if config_path and config_path.is_dir():
-            groups.append(("config", config_path, list(_iter_files(config_path))))
-        if templates_path and templates_path.is_dir():
+            config_files = list(_iter_files(config_path))
+            if not self._options.include_statistics:
+                config_files = [
+                    path for path in config_files
+                    if not (path.parent == config_path and path.name.casefold() == "statistics.json")
+                ]
+            groups.append(("config", config_path, config_files))
+        if self._options.include_templates and templates_path and templates_path.is_dir():
             groups.append(("Mallar", templates_path, list(_iter_files(templates_path))))
+        if self._options.include_statistics and base_path:
+            legacy_statistics = base_path / "statistics.json"
+            if legacy_statistics.is_file() and (
+                config_path is None
+                or legacy_statistics.resolve() != (config_path / "statistics.json").resolve()
+            ):
+                groups.append(("statistics-legacy", base_path, [legacy_statistics]))
         if self._profiles_path and self._profiles_path.is_dir():
             groups.append(("profiles", self._profiles_path, list(_iter_files(self._profiles_path, ("*.json",)))))
         if self._options.include_logs and logs_path and logs_path.is_dir():
@@ -232,10 +253,13 @@ class RestoreWorker(QRunnable):
         try:
             if not self._backup_file.is_file():
                 raise FileNotFoundError(self._backup_file)
+            base_value = getattr(self._context, "base_path", None)
+            base_path = Path(base_value) if base_value else None
             targets = {
                 "config": _context_path(self._context, "config"),
                 "Mallar": _context_path(self._context, "templates"),
                 "profiles": self._profiles_path,
+                "statistics-legacy": base_path,
             }
             self.signals.progress.emit("Kontrollerar backup…", 0)
             with zipfile.ZipFile(self._backup_file, "r") as archive:

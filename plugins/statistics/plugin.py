@@ -4,7 +4,7 @@ from __future__ import annotations
 Fil:    plugins/statistics/plugin.py
 Sökväg: Intygsgenerator/plugins/statistics/plugin.py
 
-Intygsgenerator — PySide6-statistikflik för översikt, sökning, import och
+IntygsDrive — PySide6-statistikflik för översikt, sökning, import och
 rapportering. Tunga PDF-skanningar körs via QRunnable och UI:t uppdateras bara
 från huvudtråden.
 """
@@ -760,7 +760,7 @@ class Plugin:
         layout = QVBoxLayout(inner)
         settings = QGroupBox("⚙️ Rapportinställningar", inner)
         form = QFormLayout(settings)
-        self._report_title = QLineEdit("Intygsgenerator — Statistikrapport", settings)
+        self._report_title = QLineEdit("IntygsDrive — Statistikrapport", settings)
         form.addRow("Titel:", self._report_title)
         self._report_period = self._period_selector(settings)
         form.addRow("Period:", self._report_period)

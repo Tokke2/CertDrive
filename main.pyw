@@ -7,7 +7,7 @@ Intygsgenerator — bootstrap, single-instance, pluginlivscykel och huvudfönste
 Huvudfönstret skapar aldrig en QSystemTrayIcon. Den enda tray-ikonen ägs av
 plugins/system_tray/.
 
-Version 10.8.0 (uppgraderad från 10.7.0, 2026-09-21)
+Appversion 0.0.1 (versionsnumret ändras endast på uttrycklig begäran)
 ====================================================
 1. ERBJUD INSTALLATION AV SAKNADE TILLÄGG: startup-inventarie
    (DependencyInventory) + dialog efter ready: "📦 Installera paket"
@@ -29,6 +29,7 @@ import platform
 import re
 import shutil
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -41,7 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-__version__: str = "10.12.2"
+__version__: str = "0.0.1"
 __all__: list[str] = [
     "SingleInstanceLock",
     "InstanceActivationServer",
@@ -234,13 +235,25 @@ class AutostartGuard:
         self.enabled = bool(enabled)
 
     @staticmethod
-    def _command() -> str:
-        exe = sys.executable
+    def _program_arguments() -> list[str]:
+        """Skapa samma startargument för alla operativsystem och paketformat."""
+        if getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
+            return [str(Path(sys.executable).resolve())]
+
+        interpreter = sys.executable
         if _IS_WINDOWS:
-            alt = Path(exe).with_name("pythonw.exe")  # undvik konsolfönster
-            if alt.is_file():
-                exe = str(alt)
-        return f'"{exe}" "{Path(__file__).resolve()}"'
+            # pythonw undviker konsolfönster men behåller python.exe som fallback.
+            pythonw = Path(interpreter).with_name("pythonw.exe")
+            if pythonw.is_file():
+                interpreter = str(pythonw)
+        return [interpreter, str(Path(__file__).resolve())]
+
+    @classmethod
+    def _command(cls) -> str:
+        args = cls._program_arguments()
+        if _IS_WINDOWS:
+            return subprocess.list2cmdline(args)
+        return shlex.join(args)
 
     def ensure(self) -> None:
         try:
@@ -300,7 +313,7 @@ class AutostartGuard:
             return
         data = {
             "Label": self._MAC_LABEL,
-            "ProgramArguments": [sys.executable, str(Path(__file__).resolve())],
+            "ProgramArguments": self._program_arguments(),
             "RunAtLoad": True,
         }
         payload = plistlib.dumps(data)
@@ -316,6 +329,14 @@ class AutostartGuard:
                  level=logging.WARNING)
 
     # ── Linux: XDG .desktop ───────────────────────────────────────────────
+    @staticmethod
+    def _desktop_icon() -> str:
+        for name in ("icon.svg", "icon.png", "icon.ico"):
+            path = APP_PATH / "Icon" / name
+            if path.is_file():
+                return str(path)
+        return ""
+
     def _linux(self) -> None:
         xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
         desktop = Path(xdg) / "autostart" / "intygsgenerator.desktop"
@@ -327,8 +348,11 @@ class AutostartGuard:
         content = (
             "[Desktop Entry]\n"
             "Type=Application\n"
-            "Name=Intygsgenerator\n"
+            "Name=IntygsDrive\n"
             f"Exec={self._command()}\n"
+            f"Icon={self._desktop_icon()}\n"
+            "Terminal=false\n"
+            "StartupNotify=false\n"
             "X-GNOME-Autostart-enabled=true\n"
         )
         if desktop.exists() and desktop.read_text(encoding="utf-8") == content:
@@ -336,6 +360,8 @@ class AutostartGuard:
             return
         desktop.parent.mkdir(parents=True, exist_ok=True)
         desktop.write_text(content, encoding="utf-8")
+        with suppress(OSError):
+            desktop.chmod(0o755)
         if desktop.read_text(encoding="utf-8") == content:
             _evt("autostart.installed", "Autostart installerad + verifierad (Linux)")
         else:
@@ -378,11 +404,11 @@ try:
         FOLDER_SENT,
         FOLDER_TEMPLATES,
         SESSION_ID,
-        VERSION,
         AppContext,
         ConfigManager,
         PluginManager,
     )
+    from core.updater import check_latest_release, get_current_commit
 except Exception as exc:
     _stderr(f"KRITISKT: core/ kunde inte laddas: {exc}")
     _stderr(traceback.format_exc())
@@ -398,6 +424,7 @@ try:
         QSize,
         Qt,
         QTimer,
+        QUrl,
         Signal,
         Slot,
     )
@@ -408,6 +435,7 @@ try:
         QColor,
         QCloseEvent,
         QIcon,
+        QDesktopServices,
         QLinearGradient,
         QPainter,
         QPen,
@@ -434,7 +462,13 @@ except Exception as exc:
     _stderr(f"PySide6 saknas eller kunde inte laddas: {exc}")
     raise SystemExit(3) from exc
 
-APP_VERSION: str = str(VERSION or __version__)
+class _UpdateCheckSignals(QObject):
+    """Marshala resultat från releasekontrollen tillbaka till Qt-tråden."""
+
+    completed = Signal(object)
+
+
+APP_VERSION: str = __version__
 _INSTANCE_NAME: str = APP_NAME
 
 
@@ -847,7 +881,7 @@ class MainWindow(QMainWindow):
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(icon_label)
 
-        title = QLabel("Förbereder Intygsgenerator", loading)
+        title = QLabel("Förbereder IntygsDrive", loading)
         title_font = title.font()
         title_font.setPointSize(max(15, title_font.pointSize() + 5))
         title_font.setBold(True)
@@ -1341,7 +1375,7 @@ class MainWindow(QMainWindow):
 
         answer = QMessageBox.question(
             self,
-            "Avsluta Intygsgenerator?",
+            "Avsluta IntygsDrive?",
             "Systemfältet är inte tillgängligt. Vill du avsluta programmet?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -1424,6 +1458,9 @@ class Application:
         self._missing_deps: list[dict[str, str]] = []
         self._missing_suites: list[dict[str, Any]] = []
         self._tray_logged = False
+        self._update_signals = _UpdateCheckSignals()
+        self._update_signals.completed.connect(self._on_release_check_completed)
+        self._update_thread: threading.Thread | None = None
 
     @property
     def config(self) -> Any | None:
@@ -1778,6 +1815,14 @@ class Application:
             )
             self.set_config_value("app.theme", theme, auto_save=False)
 
+        # Migrate the old Settings key; keep both keys aligned during transition.
+        start_with_os = bool(
+            self.config_value("app.start_with_os", False)
+            or self.config_value("app.autostart", False)
+        )
+        self.set_config_value("app.start_with_os", start_with_os, auto_save=False)
+        self.set_config_value("app.autostart", start_with_os, auto_save=False)
+
         defaults: dict[str, Any] = {
             "app.start_minimized": True,
             "app.close_to_tray": True,
@@ -2013,8 +2058,83 @@ class Application:
              plugins=len(plugin_names))
         # 10.8.0: erbjud installation av saknade tillägg när UI är redo.
         QTimer.singleShot(400, self._show_dependency_offer)
+        # Kontrollera GitHub Releases i bakgrunden så nätverk aldrig blockerar UI.
+        QTimer.singleShot(5000, self._start_release_check)
         # Ingen fast malluppdateringstimer här. Certificates-pluginet startar
         # en enda bakgrundsskanning självt och sammanslår manuella refresh-event.
+
+    def _start_release_check(self) -> None:
+        """Kontrollera en publicerad GitHub Release utan att blockera UI."""
+        if not bool(self.config_value("app.check_updates", True)):
+            _evt("update.check_skipped", "Automatisk releasekontroll är avstängd")
+            return
+        if self._update_thread is not None and self._update_thread.is_alive():
+            return
+
+        def check() -> None:
+            try:
+                release = check_latest_release(
+                    APP_VERSION,
+                    current_commit=get_current_commit(APP_PATH),
+                    timeout=4.0,
+                )
+                self._update_signals.completed.emit({"release": release, "error": None})
+            except Exception as exc:
+                self._update_signals.completed.emit({
+                    "release": None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+
+        self._update_thread = threading.Thread(
+            target=check, name="github-release-check", daemon=True
+        )
+        self._update_thread.start()
+        _evt("update.check_started", "Kontrollerar GitHub Releases i bakgrunden")
+
+    @Slot(object)
+    def _on_release_check_completed(self, result: Any) -> None:
+        if not isinstance(result, dict):
+            return
+        error = result.get("error")
+        if error:
+            _evt("update.check_failed", "GitHub Release-kontrollen misslyckades",
+                 level=logging.DEBUG, error=str(error))
+            return
+        release = result.get("release")
+        if release is None:
+            _evt("update.current", "Ingen nyare GitHub Release hittades",
+                 level=logging.DEBUG, version=APP_VERSION)
+            return
+
+        same_version = release.version.lstrip("vV") == APP_VERSION
+        update_label = (
+            f"Nyare kod tillgänglig för version {APP_VERSION}"
+            if same_version
+            else f"Ny version tillgänglig: {release.version}"
+        )
+        _evt("update.available", update_label,
+             version=release.version, commit=release.commit_sha, url=release.url)
+        if self.window is None or self._exit_requested:
+            return
+        message = QMessageBox(self.window)
+        message.setWindowTitle("Uppdatering tillgänglig")
+        message.setIcon(QMessageBox.Icon.Information)
+        if same_version:
+            message.setText(
+                f"Nyare kod för IntygsDrive {APP_VERSION} finns tillgänglig."
+            )
+        else:
+            message.setText(f"IntygsDrive {release.version} finns nu tillgänglig.")
+        message.setInformativeText(
+            "Öppna GitHub Releases för att läsa versionsinformationen och hämta uppdateringen."
+        )
+        if release.notes:
+            message.setDetailedText(release.notes)
+        open_button = message.addButton("Visa release", QMessageBox.ButtonRole.AcceptRole)
+        message.addButton("Senare", QMessageBox.ButtonRole.RejectRole)
+        message.exec()
+        if message.clickedButton() is open_button:
+            QDesktopServices.openUrl(QUrl(release.url))
 
     def _log_startup_summary(self) -> None:
         """10.10.0: synlig startup-självdiagnos.
@@ -2177,6 +2297,10 @@ class Application:
             self._activation_server.close()
             self._activation_server = None
 
+        # Rensa högst en gång per sjudagarsperiod innan konfigurationen stängs,
+        # så senaste lyckade körning kan sparas atomiskt.
+        self._cleanup_tech_cache()
+
         if self._config is not None:
             closer = getattr(self._config, "close", None)
             if callable(closer):
@@ -2184,26 +2308,31 @@ class Application:
                     closer()
                 except Exception:
                     _logger.exception("Kunde inte stänga ConfigManager")
-        # R6/B1: rensa teknisk Python-cache vid ordnad exit i PROD-lage (Del I §26).
-        self._cleanup_tech_cache()
 
         _evt("main.cleanup_done", "Cleanup slutförd — appen avslutas normalt")
 
     def _cleanup_tech_cache(self) -> dict[str, int]:
-        """Rensa __pycache__/.pyc/.pyo - endast i PROD, styrt av smart_cache.
+        """Rensa teknisk Python-cache högst en gång per vecka när smart_cache är på.
 
-        DEV-laget rorer aldrig cachen automatiskt (kan koras manuellt via Settings);
-        anvandardata (settings, loggar, Mallar, Out, Skickade, Backup) ar alltid fredad.
+        Användardata (settings, loggar, Mallar, Out, Skickade, Backup) lämnas
+        orörda. Datumet sparas först efter lyckad rensning.
         """
         empty: dict[str, int] = {"dirs": 0, "files": 0, "bytes": 0, "errors": 0}
-        mode = str(self.config_value("mode", "dev")).strip().lower()
-        if mode != "prod":
-            _evt("main.cache_skipped", "Teknisk cache sparas (DEV-lage)",
-                 level=logging.DEBUG, mode=mode)
-            return empty
         if not bool(self.config_value("smart_cache", True)):
             _evt("main.cache_skipped", "Teknisk cache sparas (smart_cache avstangd)",
-                 level=logging.DEBUG, mode=mode)
+                 level=logging.DEBUG)
+            return empty
+
+        today = datetime.now().date()
+        last_raw = self.config_value("smart_cache_last_cleanup", "")
+        try:
+            last_cleanup = datetime.fromisoformat(str(last_raw)).date()
+        except (TypeError, ValueError):
+            last_cleanup = None
+        if last_cleanup is not None and (today - last_cleanup).days < 7:
+            _evt("main.cache_skipped", "Cache rensades nyligen; veckointervall gäller",
+                 level=logging.DEBUG, last_cleanup=last_cleanup.isoformat(),
+                 days_since=(today - last_cleanup).days)
             return empty
         try:
             stats = clear_pycache(APP_PATH, dry_run=False)
@@ -2211,6 +2340,14 @@ class Application:
             _evt("main.cache_clear_failed", f"Kunde inte rensa teknisk cache: {exc}",
                  level=logging.WARNING, error=str(exc))
             return empty
+        if not stats.get("errors", 0):
+            self.set_config_value(
+                "smart_cache_last_cleanup", today.isoformat(), auto_save=False
+            )
+            self.save_config(force=True)
+        else:
+            _evt("main.cache_clear_partial", "Cache-rensningen blev delvis; försök igen senare",
+                 level=logging.WARNING, errors=stats.get("errors", 0))
         msg = "Rensade {} __pycache__-mappar ({} filer, {} KB)".format(
             stats.get("dirs", 0), stats.get("files", 0), round(stats.get("bytes", 0) / 1024.0, 1)
         )

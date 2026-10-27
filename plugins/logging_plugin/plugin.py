@@ -865,7 +865,7 @@ class Plugin:
         stats = self.get_statistics()
         dropped = self._interceptor.dropped if self._interceptor else 0
         lines: list[str] = [
-            "# Intygsgenerator — AI-felsökningsrapport (Logger v8.9.0)",
+            "# IntygsDrive — AI-felsökningsrapport (Logger v8.9.0)",
             "",
             f"Genererad: {datetime.now().isoformat(timespec='seconds')}",
             f"Session: `{self.session_id}` (start {stats['session_start']}, varaktighet {stats['duration_str']})",

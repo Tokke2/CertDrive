@@ -6,7 +6,7 @@ from __future__ import annotations
 # plattformsdetektering, loggning, atomisk filskrivning,
 # skärmhantering via PySide6, hjälpfunktioner och dekoratorer.
 #
-# Version: 9.2.0 (uppgraderad från 9.1.0, 2026-09-21)
+# Appversion: 0.0.1 (versionsnumret ändras endast på uttrycklig begäran)
 # © Rickard Längkvist 2025–2026
 #
 # logging_plugin äger all sessionsinformation och startloggning. Denna modul
@@ -46,7 +46,7 @@ from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Iterator
 
-__version__: str = "9.2.0"
+__version__: str = "0.0.1"
 __author__: str = "Rickard Längkvist"
 
 _START_YEAR: int = 2025
@@ -58,7 +58,7 @@ COPYRIGHT: str = (
 )
 
 APP_NAME: str = "Intygsgenerator"
-APP_DISPLAY_NAME: str = "Intygs Generator"
+APP_DISPLAY_NAME: str = "IntygsDrive"
 VERSION: str = __version__
 
 FOLDER_ICONS: str = "Icon"

@@ -64,6 +64,7 @@ IS_FROZEN: Final[bool] = bool(getattr(sys, "frozen", False) or hasattr(sys, "_ME
 
 CONFIG_FILENAME: Final[str] = "generator_settings.json"
 CONFIG_DIR_NAME: Final[str] = "js"
+APP_ICON_PATH: Final[Path] = Path(__file__).resolve().parents[2] / "Icon" / "icon.svg"
 
 UnsubscribeFunc = Callable[[], None]
 
@@ -547,9 +548,9 @@ class AutostartManager:
         desktop = (
             "[Desktop Entry]\n"
             "Type=Application\n"
-            f"Name={self.app_name}\n"
+            "Name=IntygsDrive\n"
             f"Exec={command}\n"
-            "Icon=intygsgenerator\n"
+            f"Icon={APP_ICON_PATH}\n"
             "Terminal=false\n"
             "Hidden=false\n"
             "NoDisplay=false\n"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # plugins/system_tray/plugin.py
 # Sökväg: Intygsgenerator/plugins/system_tray/plugin.py
-# Intygsgenerator — System tray-plugin: QSystemTrayIcon, kontextmeny,
+# IntygsDrive — System tray-plugin: QSystemTrayIcon, kontextmeny,
 # fönstersynlighet, notifikationer och senaste intyg.
 #
 # Version: 9.0.0
@@ -681,7 +681,7 @@ class Plugin:
 
     def _build_context_menu(self) -> QMenu:
         menu = QMenu()
-        open_action = QAction("Öppna Intygsgenerator", menu)
+        open_action = QAction("Öppna IntygsDrive", menu)
         open_action.triggered.connect(self._on_show_window)
         menu.addAction(open_action)
         settings_action = QAction("Inställningar", menu)
@@ -758,9 +758,19 @@ class Plugin:
     ) -> QIcon:
         with self._lock:
             if state not in self._icon_cache:
-                self._icon_cache[state] = _load_icon(
-                    self._icon_folder, state
-                )
+                # Use the exact application icon for the normal tray state;
+                # status/animation states may still use their purpose-built art.
+                if state is IconState.NORMAL:
+                    app = QApplication.instance()
+                    app_icon = app.windowIcon() if app is not None else QIcon()
+                    self._icon_cache[state] = (
+                        app_icon if not app_icon.isNull()
+                        else _load_icon(self._icon_folder, state)
+                    )
+                else:
+                    self._icon_cache[state] = _load_icon(
+                        self._icon_folder, state
+                    )
             return self._icon_cache[state]
 
     def _ensure_animation_icons(self) -> None:

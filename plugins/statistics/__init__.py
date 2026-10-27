@@ -4,7 +4,7 @@ from __future__ import annotations
 Fil:    plugins/statistics/__init__.py
 Sökväg: Intygsgenerator/plugins/statistics/__init__.py
 
-Intygsgenerator — paket-API, fail-safe statistikexporter och snabb mallskanning.
+IntygsDrive — paket-API, fail-safe statistikexporter och snabb mallskanning.
 
 TemplateScanner läser endast Mallar/<MallNamn>/ och använder en DOCX-filstämpel
 för cache. Statistikmotorn och UI-pluginet mjukimporteras sist så att ett
@@ -29,7 +29,7 @@ from typing import Any
 __version__: str = "10.1.0"
 __author__: str = "Rickard Längkvist"
 __plugin_name__: str = "Statistik"
-__description__: str = "Statistik, rapportering, import och mallskanning för Intygsgenerator"
+__description__: str = "Statistik, rapportering, import och mallskanning för IntygsDrive"
 
 _START_YEAR: int = 2025
 _CURRENT_YEAR: int = datetime.now().year

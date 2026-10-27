@@ -884,7 +884,7 @@ class AutostartManager:
             f"Name={self._app_name}\n"
             f"Exec={exec_line}\n"
             f"Icon={self._app_name.lower()}\n"
-            "Comment=Intygsgenerator\n"
+            "Comment=IntygsDrive\n"
             "Hidden=false\n"
             "NoDisplay=false\n"
             "X-GNOME-Autostart-enabled=true\n"

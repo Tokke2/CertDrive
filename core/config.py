@@ -81,7 +81,7 @@ try:
     INFRASTRUCTURE_AVAILABLE = True
 except ImportError:
     APP_NAME = "Intygsgenerator"
-    APP_DISPLAY_NAME = "Intygs Generator"
+    APP_DISPLAY_NAME = "IntygsDrive"
     VERSION = __version__
     FOLDER_ICONS = "Icon"
     FOLDER_CONFIG = "js"
@@ -246,7 +246,7 @@ class ConfigManager:
         "app.start_with_os": False,
         "app.language": "sv",
         "app.theme": "system",
-        "app.check_updates": False,
+        "app.check_updates": True,
         "window.width": DEFAULT_WINDOW_WIDTH,
         "window.height": DEFAULT_WINDOW_HEIGHT,
         "window.last_tab": 0,
@@ -1108,16 +1108,22 @@ class AutostartManager:
                 ).resolve()
                 exec_cmd = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
 
+            icon_path = self.app_path / FOLDER_ICONS / "icon.svg"
+            if not icon_path.is_file():
+                icon_path = self.app_path / FOLDER_ICONS / "icon.png"
             content = (
                 "[Desktop Entry]\n"
                 "Type=Application\n"
-                f"Name={self.app_name}\n"
+                f"Name={APP_DISPLAY_NAME}\n"
                 f"Exec={exec_cmd}\n"
+                f"Icon={icon_path if icon_path.is_file() else self.app_name}\n"
                 "Terminal=false\n"
-                "X-GNOME-Autostart-enabled=true\n"
                 "StartupNotify=false\n"
+                "X-GNOME-Autostart-enabled=true\n"
             )
             desktop.write_text(content, encoding="utf-8")
+            with suppress(OSError):
+                desktop.chmod(0o755)
             self._log.debug("[Autostart] Linux .desktop: %s", desktop)
             return True
         except Exception as exc:
@@ -1148,10 +1154,10 @@ class IconManager:
     """Hanterar applikationsikoner med PySide6 och QPainter-fallback."""
 
     SUPPORTED_FORMATS: ClassVar[set[str]] = {
-        ".ico", ".png", ".gif", ".jpg", ".jpeg", ".icns", ".bmp",
+        ".svg", ".ico", ".png", ".gif", ".jpg", ".jpeg", ".icns", ".bmp",
     }
     PRIORITY_ORDER: ClassVar[list[str]] = [
-        ".ico", ".png", ".icns", ".gif", ".jpg", ".jpeg", ".bmp",
+        ".svg", ".png", ".ico", ".icns", ".gif", ".jpg", ".jpeg", ".bmp",
     ]
 
     def __init__(self, base_path: PathLike) -> None:

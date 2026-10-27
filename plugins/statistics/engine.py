@@ -4,7 +4,7 @@ from __future__ import annotations
 Fil:    plugins/statistics/engine.py
 Sökväg: Intygsgenerator/plugins/statistics/engine.py
 
-Intygsgenerator — statistikmodeller, beräkningar, import och rapporter.
+IntygsDrive — statistikmodeller, beräkningar, import och rapporter.
 
 KÄNSLA FÖR CACHE:
 - Läs först från JSON-cache
@@ -549,7 +549,7 @@ class StatisticsSummary:
 class ReportConfig:
     """Konfiguration för rapportgenerering."""
 
-    title: str = "Intygsgenerator — Statistikrapport"
+    title: str = "IntygsDrive — Statistikrapport"
     subtitle: str = ""
     period: TimePeriod = TimePeriod.THIS_MONTH
     start_date: date | None = None
@@ -561,7 +561,7 @@ class ReportConfig:
     max_details: int = 50
     format: ReportFormat = ReportFormat.HTML
     chart_type: ChartType = ChartType.BAR
-    author: str = "Intygsgenerator"
+    author: str = "IntygsDrive"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ReportConfig:
@@ -578,7 +578,7 @@ class ReportConfig:
             max_details=max(0, _safe_int(data.get("max_details"), 50)),
             format=ReportFormat.from_value(data.get("format")),
             chart_type=ChartType.from_value(data.get("chart_type")),
-            author=str(data.get("author", "Intygsgenerator") or "Intygsgenerator"),
+            author=str(data.get("author", "IntygsDrive") or "IntygsDrive"),
         )
 
     def to_dict(self) -> dict[str, Any]:

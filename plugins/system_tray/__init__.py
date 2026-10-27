@@ -4,7 +4,7 @@ from __future__ import annotations
 """
 Fil:       plugins/system_tray/__init__.py
 Sökväg:    Intygsgenerator/plugins/system_tray/__init__.py
-Projekt:   Intygsgenerator
+Projekt:   IntygsDrive
 Version:   8.4.1
 Ansvar:    Paketinitiering, metadata och säker export för system_tray-pluginet.
 
@@ -103,9 +103,9 @@ except Exception as exc:
     DEFAULT_WINDOW_HEIGHT: int = 800
     WINDOW_SCREEN_SCALE: float = 0.82
 
-    TOOLTIP_NORMAL: str = "Intygsgenerator"
-    TOOLTIP_MINIMIZED: str = "Intygsgenerator körs i bakgrunden"
-    TOOLTIP_BUSY: str = "Intygsgenerator arbetar"
+    TOOLTIP_NORMAL: str = "IntygsDrive"
+    TOOLTIP_MINIMIZED: str = "IntygsDrive körs i bakgrunden"
+    TOOLTIP_BUSY: str = "IntygsDrive arbetar"
 
     class Platform(Enum):
         """Plattformar som stöds av tray-pluginet."""

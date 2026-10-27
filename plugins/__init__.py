@@ -896,7 +896,7 @@ class WindowManager:
 
     def setup_window(
         self,
-        title: str = "Intygsgenerator",
+        title: str = "IntygsDrive",
         start_minimized: bool = False,
     ) -> None:
         """
