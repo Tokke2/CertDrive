@@ -498,9 +498,8 @@ class Plugin:
         self._batch_button: QPushButton | None = None
         self._customer_combo: QComboBox | None = None
         self._label_mapping_combo: QComboBox | None = None
-        self._customer_print_checkbox: QCheckBox | None = None
-        self._pending_customer: Customer | None = None
-        self._pending_customer_label = False
+        self._label_print_checkbox: QCheckBox | None = None
+        self._pending_label_print = False
         self._pending_template_name = ""
         self._progress_bar: QProgressBar | None = None
         self._progress_label: QLabel | None = None
@@ -1102,7 +1101,6 @@ class Plugin:
         outer.addWidget(self._build_status_row())
         outer.addWidget(self._build_template_selector())
         outer.addWidget(self._build_label_mapping_row())
-        outer.addWidget(self._build_customer_row())
         outer.addWidget(self._build_template_info())
         outer.addWidget(self._build_fields_section(), stretch=1)
         outer.addWidget(self._build_action_row())
@@ -1167,36 +1165,13 @@ class Plugin:
         self._label_mapping_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._label_mapping_combo.currentIndexChanged.connect(self._on_label_mapping_changed)
         layout.addWidget(self._label_mapping_combo, stretch=1)
-        self._refresh_label_mapping_combo(self._last_selected_name)
-        return frame
-
-    def _build_customer_row(self) -> QWidget:
-        frame = QFrame()
-        frame.setFrameShape(QFrame.Shape.StyledPanel)
-        layout = QHBoxLayout(frame)
-        layout.setContentsMargins(self._sp(10), self._sp(5), self._sp(10), self._sp(5))
-        layout.setSpacing(self._sp(7))
-        layout.addWidget(QLabel("👤 Kund:", frame))
-
-        self._customer_combo = QComboBox(frame)
-        self._customer_combo.setMinimumHeight(self._sp(32))
-        self._customer_combo.setMinimumWidth(self._sp(180))
-        self._customer_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._customer_combo.currentIndexChanged.connect(self._on_customer_changed)
-        layout.addWidget(self._customer_combo, stretch=1)
-
-        manage = QPushButton("Hantera kunder…", frame)
-        manage.setMinimumHeight(self._sp(32))
-        manage.clicked.connect(self._manage_customers)
-        layout.addWidget(manage)
-
-        self._customer_print_checkbox = QCheckBox("Skriv kundetikett automatiskt", frame)
-        self._customer_print_checkbox.setToolTip(
-            "Skriv ut en etikett för vald kund direkt efter att intyget har skapats."
+        self._label_print_checkbox = QCheckBox("Skriv etikett automatiskt", frame)
+        self._label_print_checkbox.setToolTip(
+            "Skriv ut etiketten som är kopplad till intygsmallen efter att intyget skapats."
         )
-        self._customer_print_checkbox.setEnabled(False)
-        layout.addWidget(self._customer_print_checkbox)
-        self._refresh_customer_combo()
+        self._label_print_checkbox.setEnabled(False)
+        layout.addWidget(self._label_print_checkbox)
+        self._refresh_label_mapping_combo(self._last_selected_name)
         return frame
 
     def _refresh_label_mapping_combo(self, template_name: str) -> None:
@@ -1229,10 +1204,10 @@ class Plugin:
             else:
                 combo.setToolTip(
                     f"Välj vilken .lbx-etikett som hör till intygsmallen {template_name}. "
-                    "Automatisk kundetikett är avstängd tills en mall har valts."
+                    "Automatisk etikettutskrift är avstängd tills en mall har valts."
                 )
         combo.blockSignals(False)
-        self._on_customer_changed()
+        self._update_label_print_option()
 
     def _mapped_label_path(self, template_name: str | None) -> Path | None:
         label_name = self._label_mappings.get(str(template_name or ""), "")
@@ -1279,7 +1254,28 @@ class Plugin:
             self._set_status(f"🏷️ {label_name} kopplad till intygsmallen {template_name}")
         else:
             self._set_status(f"Ingen etikettmall vald för {template_name}")
-        self._on_customer_changed()
+        self._update_label_print_option()
+
+    def _update_label_print_option(self) -> None:
+        checkbox = self._label_print_checkbox
+        if checkbox is None:
+            return
+        template_name, _template = self._selected_template()
+        mapped_label = self._mapped_label_path(template_name)
+        can_print = bool(mapped_label and _labels.bpac_available())
+        checkbox.setEnabled(can_print)
+        if mapped_label is None:
+            checkbox.setChecked(False)
+            checkbox.setToolTip(
+                f"Välj en etikettmall för intygsmallen {template_name} först."
+                if template_name else "Välj en intygsmall och koppla en etikettmall först."
+            )
+        elif not _labels.bpac_available():
+            checkbox.setToolTip("Automatisk utskrift kräver Windows och Brother b-PAC.")
+        else:
+            checkbox.setToolTip(
+                f"Skriv ut {mapped_label.name} efter att intyget har skapats."
+            )
 
     def _refresh_customer_combo(self, selected_id: str | None = None) -> None:
         combo = self._customer_combo
@@ -1295,41 +1291,6 @@ class Plugin:
         index = combo.findData(selected_id) if selected_id else -1
         combo.setCurrentIndex(index if index >= 0 else 0)
         combo.blockSignals(False)
-        self._on_customer_changed()
-
-    def _selected_customer(self) -> Customer | None:
-        combo = self._customer_combo
-        customer_id = str(combo.currentData() or "") if combo is not None else ""
-        return next((customer for customer in self._customers
-                     if customer.customer_id == customer_id), None)
-
-    @Slot()
-    def _on_customer_changed(self, *_args: object) -> None:
-        selected = self._selected_customer()
-        checkbox = self._customer_print_checkbox
-        if checkbox is None:
-            return
-        template_name, _template = self._selected_template()
-        mapped_label = self._mapped_label_path(template_name)
-        has_labels = bool(_labels.find_labels(_labels.label_folder(self.templates_path)))
-        bpac_ready = _labels.bpac_available()
-        can_print = bool(selected and mapped_label and bpac_ready)
-        checkbox.setEnabled(can_print)
-        if can_print and mapped_label is not None:
-            tip = (
-                f"Skriv ut {mapped_label.name} för vald kund efter att intyget har skapats."
-            )
-        elif not selected:
-            tip = "Välj en kund först."
-        elif not has_labels:
-            tip = "Lägg minst en .lbx-mall i mappen Etiketter/."
-        elif mapped_label is None:
-            tip = f"Välj en etikettmall för intygsmallen {template_name} först."
-        else:
-            tip = "Automatisk utskrift kräver Windows och Brother b-PAC."
-        checkbox.setToolTip(tip)
-        if selected is None or mapped_label is None:
-            checkbox.setChecked(False)
 
     @Slot()
     def _manage_customers(self) -> None:
@@ -1943,12 +1904,10 @@ class Plugin:
         self._evt("cert.generate_started", f"Generering startad: {name}",
                   template=name, fields=len(values))
         self._emit_event("certificate.before_generate", {"template": name, "values": values})
-        self._last_values = dict(values)  # 10.4.0: till etikettfält
-        self._pending_customer = self._selected_customer()
+        self._last_values = dict(values)  # tillgängliga som etikettfält
         self._pending_template_name = name
-        self._pending_customer_label = bool(
-            self._pending_customer and self._customer_print_checkbox
-            and self._customer_print_checkbox.isChecked()
+        self._pending_label_print = bool(
+            self._label_print_checkbox and self._label_print_checkbox.isChecked()
         )
         worker = _GenerationWorker(generator, template, values)
         worker.signals.progress.connect(self._on_generation_progress, Qt.ConnectionType.QueuedConnection)
@@ -2004,8 +1963,7 @@ class Plugin:
         self._show_progress(False)
         self._restore_action_buttons()
         if not _result_is_success(result):
-            self._pending_customer = None
-            self._pending_customer_label = False
+            self._pending_label_print = False
             self._pending_template_name = ""
             error = str(_result_value(result, "error", "Okänt fel"))
             QMessageBox.critical(self._tab_widget, "Genereringsfel", error)
@@ -2058,12 +2016,10 @@ class Plugin:
             {"title": "Intyg skapat", "message": f"#{number} – {name}"},
         )
 
-        # Erbjud etikett till vald kund, eller behåll den generiska postetiketten.
-        customer = self._pending_customer
         template_name = self._pending_template_name or name
-        automatic_customer_label = self._pending_customer_label
-        self._pending_customer = None
-        self._pending_customer_label = False
+        mapped_label = self._mapped_label_path(template_name)
+        automatic_label_print = bool(self._pending_label_print and mapped_label)
+        self._pending_label_print = False
         self._pending_template_name = ""
         box = QMessageBox(self._tab_widget)
         box.setIcon(QMessageBox.Icon.Question)
@@ -2071,46 +2027,35 @@ class Plugin:
         message = (
             f"✅ Intyg #{number} skapades.\n\n📄 {filename}\n📑 {pages} sidor\n⏱️ {duration:.1f}s"
         )
-        if automatic_customer_label and customer is not None:
-            message += f"\n\n🏷️ Kundetikett för {customer.name} skrivs ut."
+        if automatic_label_print and mapped_label is not None:
+            message += f"\n\n🏷️ Etiketten {mapped_label.name} skrivs ut."
         box.setText(message)
         open_button = box.addButton("📄 Öppna PDF", QMessageBox.ButtonRole.AcceptRole)
         label_button = None
-        if not automatic_customer_label and _labels.find_labels(_labels.label_folder(self.templates_path)):
-            if customer is not None:
-                label_button = box.addButton(
-                    f"🏷️ Etikett till {customer.name}", QMessageBox.ButtonRole.ActionRole
-                )
-            else:
-                label_button = box.addButton(
-                    "🏷️ Skriv postetikett", QMessageBox.ButtonRole.ActionRole
-                )
+        if not automatic_label_print and _labels.find_labels(_labels.label_folder(self.templates_path)):
+            label_button = box.addButton("🏷️ Skriv etikett", QMessageBox.ButtonRole.ActionRole)
         box.addButton("Stäng", QMessageBox.ButtonRole.RejectRole)
         box.exec()
         clicked = box.clickedButton()
         if clicked is open_button and output_path:
             self._open_path(Path(str(output_path)))
-        if automatic_customer_label and customer is not None:
-            self._start_customer_label_print(customer, template_name, automatic=True)
+        if automatic_label_print and mapped_label is not None:
+            self._start_label_print(mapped_label, 1, dict(self._last_values))
         elif label_button is not None and clicked is label_button:
-            if customer is not None:
-                self._start_customer_label_print(customer, template_name)
-            else:
-                self._print_label_dialog(template_name=template_name)
+            self._print_label_dialog(template_name=template_name)
 
-    # ── Postetiketter (QL-500 via b-PAC) ─────────────────────────────────
+    # ── Etikettutskrift (QL-500 via b-PAC) ────────────────────────────────
 
     def _print_label_dialog(
         self,
         template_name: str | None = None,
-        customer: Customer | None = None,
     ) -> None:
         """Use the selected template-to-label mapping, or choose a label once."""
         folder = _labels.label_folder(self.templates_path)
         labels = _labels.find_labels(folder)
         if not labels:
             QMessageBox.information(
-                self._tab_widget, "Postetikett",
+                self._tab_widget, "Etikett",
                 f"Inga etikettmallar (.lbx) hittades i:\n{folder}",
             )
             self._evt("label.none", "Inga .lbx-etiketter hittades", level=logging.WARNING,
@@ -2134,7 +2079,7 @@ class Plugin:
                 display_names = [f"{path.stem} — {path.name}" for path in labels]
                 selected, ok = QInputDialog.getItem(
                     self._tab_widget,
-                    "Postetikett",
+                    "Etikett",
                     f"Välj etikett för intygsmallen {selected_template or '(okänd)'}:",
                     display_names,
                     0,
@@ -2148,49 +2093,12 @@ class Plugin:
                 chosen = labels[0]
 
         copies, ok = QInputDialog.getInt(
-            self._tab_widget, "Postetikett", f"Antal etiketter ({chosen.stem}):", 1, 1, 99,
+            self._tab_widget, "Etikett", f"Antal etiketter ({chosen.stem}):", 1, 1, 99,
         )
         if not ok:
             self._evt("label.cancelled", "Etikettutskrift avbruten", level=logging.DEBUG)
             return
-        values = dict(self._last_values)
-        if customer is not None:
-            values.update(customer.label_values())
-        self._start_label_print(chosen, copies, values)
-
-    def _start_customer_label_print(
-        self,
-        customer: Customer,
-        template_name: str | None = None,
-        *,
-        automatic: bool = False,
-    ) -> None:
-        selected_template = template_name or self._last_selected_name
-        chosen = self._mapped_label_path(selected_template)
-        if chosen is None:
-            if automatic:
-                QMessageBox.warning(
-                    self._tab_widget,
-                    "Etikettmall saknas",
-                    f"Välj en etikettmall för intygsmallen {selected_template} i raden "
-                    "'Etikett för intygsmall' innan automatisk utskrift används.",
-                )
-            else:
-                self._print_label_dialog(selected_template, customer)
-            return
-        if not _labels.bpac_available():
-            QMessageBox.warning(
-                self._tab_widget, "Brother b-PAC saknas",
-                "Kundetikett kräver Windows, Brother b-PAC och en installerad "
-                "Brother-skrivare.\n\nHämta b-PAC här:\n" + _labels.BPAC_DOWNLOAD_URL,
-            )
-            return
-        values = dict(self._last_values)
-        values.update(customer.label_values())
-        self._evt("label.customer_print_started", f"Kundetikett startad: {customer.name}",
-                  customer_id=customer.customer_id, label=chosen.name,
-                  template=selected_template)
-        self._start_label_print(chosen, 1, values)
+        self._start_label_print(chosen, copies, dict(self._last_values))
 
     def _start_label_print(self, chosen: Path, copies: int, values: dict[str, str]) -> None:
         self._evt("label.print_started", f"Skriver ut {copies} × {chosen.name}",
@@ -2217,12 +2125,11 @@ class Plugin:
         self._set_status(f"❌ Etikettutskrift misslyckades: {result.label}")
         self._evt("label.print_failed", f"Etikettutskrift misslyckades: {result.error}",
                   level=logging.ERROR, label=result.label, error=result.error)
-        QMessageBox.warning(self._tab_widget, "Postetikett", result.error)
+        QMessageBox.warning(self._tab_widget, "Etikett", result.error)
 
     @Slot(str)
     def _on_generation_error(self, error: str) -> None:
-        self._pending_customer = None
-        self._pending_customer_label = False
+        self._pending_label_print = False
         self._pending_template_name = ""
         self._show_progress(False)
         self._restore_action_buttons()
