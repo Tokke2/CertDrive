@@ -408,7 +408,13 @@ try:
         ConfigManager,
         PluginManager,
     )
-    from core.updater import check_latest_release, get_current_commit
+    from core.updater import (
+        check_latest_release,
+        get_current_commit,
+        launch_pending_update_helper,
+        stage_release_update,
+        UPDATE_INTERVAL_HOURS,
+    )
 except Exception as exc:
     _stderr(f"KRITISKT: core/ kunde inte laddas: {exc}")
     _stderr(traceback.format_exc())
@@ -424,7 +430,6 @@ try:
         QSize,
         Qt,
         QTimer,
-        QUrl,
         Signal,
         Slot,
     )
@@ -435,7 +440,6 @@ try:
         QColor,
         QCloseEvent,
         QIcon,
-        QDesktopServices,
         QLinearGradient,
         QPainter,
         QPen,
@@ -1461,6 +1465,7 @@ class Application:
         self._update_signals = _UpdateCheckSignals()
         self._update_signals.completed.connect(self._on_release_check_completed)
         self._update_thread: threading.Thread | None = None
+        self._update_timer: QTimer | None = None
 
     @property
     def config(self) -> Any | None:
@@ -2058,8 +2063,13 @@ class Application:
              plugins=len(plugin_names))
         # 10.8.0: erbjud installation av saknade tillägg när UI är redo.
         QTimer.singleShot(400, self._show_dependency_offer)
-        # Kontrollera GitHub Releases i bakgrunden så nätverk aldrig blockerar UI.
+        # Kontrollera vid start och därefter var tolfte timme (två gånger per dygn).
         QTimer.singleShot(5000, self._start_release_check)
+        if self._update_timer is None:
+            self._update_timer = QTimer(self.qapp)
+            self._update_timer.setInterval(UPDATE_INTERVAL_HOURS * 60 * 60 * 1000)
+            self._update_timer.timeout.connect(self._start_release_check)
+            self._update_timer.start()
         # Ingen fast malluppdateringstimer här. Certificates-pluginet startar
         # en enda bakgrundsskanning självt och sammanslår manuella refresh-event.
 
@@ -2076,9 +2086,16 @@ class Application:
                 release = check_latest_release(
                     APP_VERSION,
                     current_commit=get_current_commit(APP_PATH),
-                    timeout=4.0,
+                    timeout=8.0,
                 )
-                self._update_signals.completed.emit({"release": release, "error": None})
+                staged = None
+                if release is not None:
+                    staged = stage_release_update(APP_PATH, release, timeout=45.0)
+                self._update_signals.completed.emit({
+                    "release": release,
+                    "staged": staged,
+                    "error": None,
+                })
             except Exception as exc:
                 self._update_signals.completed.emit({
                     "release": None,
@@ -2097,8 +2114,10 @@ class Application:
             return
         error = result.get("error")
         if error:
-            _evt("update.check_failed", "GitHub Release-kontrollen misslyckades",
-                 level=logging.DEBUG, error=str(error))
+            _evt("update.check_failed", "Automatisk GitHub-uppdatering misslyckades",
+                 level=logging.WARNING, error=str(error))
+            if self.window is not None and not self._exit_requested:
+                self.window.status_signal.emit("⚠ Automatisk uppdatering misslyckades; försöker igen senare.")
             return
         release = result.get("release")
         if release is None:
@@ -2106,35 +2125,20 @@ class Application:
                  level=logging.DEBUG, version=APP_VERSION)
             return
 
-        same_version = release.version.lstrip("vV") == APP_VERSION
-        update_label = (
-            f"Nyare kod tillgänglig för version {APP_VERSION}"
-            if same_version
-            else f"Ny version tillgänglig: {release.version}"
-        )
-        _evt("update.available", update_label,
-             version=release.version, commit=release.commit_sha, url=release.url)
-        if self.window is None or self._exit_requested:
+        staged = result.get("staged")
+        if staged is None:
             return
-        message = QMessageBox(self.window)
-        message.setWindowTitle("Uppdatering tillgänglig")
-        message.setIcon(QMessageBox.Icon.Information)
-        if same_version:
-            message.setText(
-                f"Nyare kod för IntygsDrive {APP_VERSION} finns tillgänglig."
+        if not getattr(staged, "staged", False):
+            _evt("update.current", "Nedladdade appfiler är redan aktuella",
+                 level=logging.DEBUG, version=release.version, commit=release.commit_sha)
+            return
+
+        _evt("update.staged", "Nyare release hämtad och väntar på att appen stängs",
+             version=release.version, commit=release.commit_sha)
+        if self.window is not None and not self._exit_requested:
+            self.window.status_signal.emit(
+                f"⬇ Uppdatering {release.version} hämtad — installeras automatiskt när appen stängs."
             )
-        else:
-            message.setText(f"IntygsDrive {release.version} finns nu tillgänglig.")
-        message.setInformativeText(
-            "Öppna GitHub Releases för att läsa versionsinformationen och hämta uppdateringen."
-        )
-        if release.notes:
-            message.setDetailedText(release.notes)
-        open_button = message.addButton("Visa release", QMessageBox.ButtonRole.AcceptRole)
-        message.addButton("Senare", QMessageBox.ButtonRole.RejectRole)
-        message.exec()
-        if message.clickedButton() is open_button:
-            QDesktopServices.openUrl(QUrl(release.url))
 
     def _log_startup_summary(self) -> None:
         """10.10.0: synlig startup-självdiagnos.
@@ -2308,6 +2312,10 @@ class Application:
                     closer()
                 except Exception:
                     _logger.exception("Kunde inte stänga ConfigManager")
+
+        if launch_pending_update_helper(APP_PATH, os.getpid()):
+            _evt("update.helper_started",
+                 "Uppdateringshjälparen installerar hämtad kod efter att appen stängts")
 
         _evt("main.cleanup_done", "Cleanup slutförd — appen avslutas normalt")
 

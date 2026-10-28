@@ -1,0 +1,8 @@
+# Local automatic-updater state and payloads
+/js/update_state.json
+/js/update-helper.log
+/js/.update-staging/
+
+# Python bytecode generated at runtime
+__pycache__/
+*.py[cod]
