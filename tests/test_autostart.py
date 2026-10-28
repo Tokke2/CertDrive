@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from core.config import AutostartManager
+from core.config import AutostartManager, ConfigManager
+
+
+class StartupDefaultsTests(unittest.TestCase):
+    def test_autostart_and_minimized_start_are_enabled_by_default(self):
+        self.assertTrue(ConfigManager.DEFAULT_SETTINGS["app.start_with_os"])
+        self.assertTrue(ConfigManager.DEFAULT_SETTINGS["app.start_minimized"])
 
 
 class LinuxAutostartTests(unittest.TestCase):

@@ -243,7 +243,7 @@ class ConfigManager:
         "app.minimize_to_tray": True,
         "app.single_click_open": True,
         "app.show_notifications": True,
-        "app.start_with_os": False,
+        "app.start_with_os": True,
         "app.language": "sv",
         "app.theme": "system",
         "app.check_updates": True,
@@ -1575,7 +1575,7 @@ class TrayConfig:
     close_to_tray: bool = True
     single_click_open: bool = True
     show_notifications: bool = True
-    start_with_os: bool = False
+    start_with_os: bool = True
 
     @classmethod
     def from_config(cls, config: ConfigManager | None) -> "TrayConfig":
@@ -1590,7 +1590,7 @@ class TrayConfig:
             show_notifications=bool(
                 config.get("app.show_notifications", True)
             ),
-            start_with_os=bool(config.get("app.start_with_os", False)),
+            start_with_os=bool(config.get("app.start_with_os", True)),
         )
 
     def save_to_config(self, config: ConfigManager | None) -> None:

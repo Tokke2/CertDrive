@@ -371,9 +371,9 @@ class Plugin:
     priority: int = PLUGIN_PRIORITY
 
     SETTING_DEFINITIONS: list[SettingDefinition] = [
-        SettingDefinition("app.start_with_os", "Starta med operativsystemet", "Startar programmet automatiskt vid datorstart", "bool", False, section="startup", tooltip="Registrerar programmet i operativsystemets autostart."),
+        SettingDefinition("app.start_with_os", "Starta med operativsystemet", "Startar programmet automatiskt vid datorstart", "bool", True, section="startup", tooltip="Registrerar programmet i operativsystemets autostart."),
         SettingDefinition("app.tray.minimize_to_tray", "Minimera till systemfältet", "Dölj fönstret vid minimering och visa det bara som ikon i systemfältet.", "bool", True, section="startup", icon="📥"),
-        SettingDefinition("app.tray.start_minimized", "Starta minimerad", "Starta programmet i systemfältet.", "bool", True, section="startup", icon="🔽"),
+        SettingDefinition("app.start_minimized", "Starta minimerad", "Starta programmet i systemfältet.", "bool", True, section="startup", icon="🔽"),
         SettingDefinition("app.tray.show_notifications", "Visa tray-notifieringar", "Visa notifieringar från systemfältet.", "bool", True, section="startup", icon="🔔"),
         SettingDefinition("app.tray.single_click_open", "Enkelklick öppnar fönstret", "Öppna fönstret med enkelklick på tray-ikonen.", "bool", True, section="startup"),
         SettingDefinition("app.confirm_exit", "Bekräfta avslut", "Fråga innan programmet avslutas via meny.", "bool", True, section="startup"),
@@ -700,7 +700,7 @@ class Plugin:
 
     def _sync_autostart(self) -> None:
         actual = self._autostart_manager.sync()
-        saved = bool(self.get_setting("app.start_with_os", False))
+        saved = bool(self.get_setting("app.start_with_os", True))
         if actual != saved:
             self._setting_set("app.start_with_os", actual)
             self._setting_set("app.autostart", actual)
@@ -711,7 +711,7 @@ class Plugin:
             return
         for attribute, key, default in (
             ("minimize_to_tray", "app.tray.minimize_to_tray", True),
-            ("start_minimized", "app.tray.start_minimized", True),
+            ("start_minimized", "app.start_minimized", True),
             ("show_notifications", "app.tray.show_notifications", True),
             ("single_click_open", "app.tray.single_click_open", True),
         ):

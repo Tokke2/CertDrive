@@ -8,7 +8,7 @@
     "parallel_jobs": 2
   },
   "app": {
-    "autostart": false,
+    "autostart": true,
     "check_updates": true,
     "close_to_tray": true,
     "confirm_exit": true,
@@ -17,13 +17,13 @@
     "show_notifications": true,
     "single_click_open": true,
     "start_minimized": true,
-    "start_with_os": false,
+    "start_with_os": true,
     "theme": "system",
     "tray": {
       "minimize_to_tray": true,
       "show_notifications": true,
       "single_click_open": true,
-      "start_minimized": false
+      "start_minimized": true
     }
   },
   "backup": {

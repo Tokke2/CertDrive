@@ -1539,7 +1539,7 @@ class Application:
 
     def _ensure_autostart(self) -> None:
         """Självläkande multi-OS-autostart enligt app.start_with_os."""
-        AutostartGuard(bool(self.config_value("app.start_with_os", False))).ensure()
+        AutostartGuard(bool(self.config_value("app.start_with_os", True))).ensure()
 
     def _check_dependencies(self) -> None:
         """Inventera saknade tillägg; erbjud installation efter ready."""
@@ -1847,18 +1847,20 @@ class Application:
             )
             self.set_config_value("app.theme", theme, auto_save=False)
 
-        # Migrate the old Settings key; keep both keys aligned during transition.
-        start_with_os = bool(
-            self.config_value("app.start_with_os", False)
-            or self.config_value("app.autostart", False)
-        )
+        # Migrate the old Settings key; new installations start with the OS by default.
+        stored_start_with_os = self.config_value("app.start_with_os", None)
+        stored_autostart = self.config_value("app.autostart", None)
+        if stored_start_with_os is None and stored_autostart is None:
+            start_with_os = True
+        else:
+            start_with_os = bool(stored_start_with_os or stored_autostart)
         self.set_config_value("app.start_with_os", start_with_os, auto_save=False)
         self.set_config_value("app.autostart", start_with_os, auto_save=False)
 
         defaults: dict[str, Any] = {
             "app.start_minimized": True,
             "app.close_to_tray": True,
-            "app.start_with_os": False,
+            "app.start_with_os": True,
             "app.theme": theme,
             "general.theme": theme,
             "window.width": 1120,

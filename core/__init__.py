@@ -379,7 +379,7 @@ except Exception as _config_exc:
         def is_enabled(self) -> bool:
             if self._settings:
                 return bool(
-                    self._settings.get("app.start_with_os", False)
+                    self._settings.get("app.start_with_os", True)
                 )
             return False
 
@@ -484,7 +484,7 @@ except Exception as _config_exc:
         close_to_tray: bool = True
         single_click_open: bool = True
         show_notifications: bool = True
-        start_with_os: bool = False
+        start_with_os: bool = True
 
         @classmethod
         def from_config(cls, config: Any) -> TrayConfig:
@@ -507,7 +507,7 @@ except Exception as _config_exc:
                     config.get("app.show_notifications", True)
                 ),
                 start_with_os=bool(
-                    config.get("app.start_with_os", False)
+                    config.get("app.start_with_os", True)
                 ),
             )
 
