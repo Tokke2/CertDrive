@@ -422,6 +422,7 @@ except Exception as exc:
 
 try:
     from PySide6.QtCore import (
+        QEvent,
         QIODevice,
         QObject,
         QPoint,
@@ -1367,14 +1368,40 @@ class MainWindow(QMainWindow):
     def _on_quit(self) -> None:
         self._app.exit()
 
+    def changeEvent(self, event: QEvent) -> None:
+        """Route the window's minimize action to the tray when configured."""
+        super().changeEvent(event)
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and self.isMinimized()
+            and not self._app.is_exiting
+            and self._app.is_tray_available()
+            and bool(self._app.config_value("app.tray.minimize_to_tray",
+                                            self._app.config_value("app.minimize_to_tray", True)))
+        ):
+            QTimer.singleShot(0, self._hide_minimized_window)
+
+    @Slot()
+    def _hide_minimized_window(self) -> None:
+        if self.isMinimized() and not self._app.is_exiting:
+            self.hide_signal.emit()
+
     def closeEvent(self, event: QCloseEvent) -> None:
-        """X minimerar säkert till tray i stället för att avsluta processen."""
+        """X sends the window to the system tray when that option is enabled."""
         if self._app.is_exiting:
             event.accept()
             return
-        if self._app.is_tray_available():
+        close_to_tray = bool(
+            self._app.config_value("app.close_to_tray",
+                                   self._app.config_value("app.tray.close_to_tray", True))
+        )
+        if self._app.is_tray_available() and close_to_tray:
             event.ignore()
             self.hide_signal.emit()
+            return
+        if self._app.is_tray_available() and not close_to_tray:
+            self._app.exit()
+            event.accept()
             return
 
         answer = QMessageBox.question(

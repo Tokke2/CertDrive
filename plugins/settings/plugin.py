@@ -372,7 +372,7 @@ class Plugin:
 
     SETTING_DEFINITIONS: list[SettingDefinition] = [
         SettingDefinition("app.start_with_os", "Starta med operativsystemet", "Startar programmet automatiskt vid datorstart", "bool", False, section="startup", tooltip="Registrerar programmet i operativsystemets autostart."),
-        SettingDefinition("app.tray.minimize_to_tray", "Minimera till systemfältet", "Dölj fönstret i stället för att avsluta vid X.", "bool", True, section="startup", icon="📥"),
+        SettingDefinition("app.tray.minimize_to_tray", "Minimera till systemfältet", "Dölj fönstret vid minimering och visa det bara som ikon i systemfältet.", "bool", True, section="startup", icon="📥"),
         SettingDefinition("app.tray.start_minimized", "Starta minimerad", "Starta programmet i systemfältet.", "bool", True, section="startup", icon="🔽"),
         SettingDefinition("app.tray.show_notifications", "Visa tray-notifieringar", "Visa notifieringar från systemfältet.", "bool", True, section="startup", icon="🔔"),
         SettingDefinition("app.tray.single_click_open", "Enkelklick öppnar fönstret", "Öppna fönstret med enkelklick på tray-ikonen.", "bool", True, section="startup"),
