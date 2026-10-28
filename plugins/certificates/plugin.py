@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
 
 from . import labels as _labels
 from .customers import Customer, load_customers, save_customers
+from .history import find_duplicate_certificates, registration_from_values
 from .view import (
     COPYRIGHT,
     EngineErrorWidget,
@@ -1696,6 +1697,90 @@ class Plugin:
 
     # ── Generering ────────────────────────────────────────────────────────
 
+    def _certificate_history_records(self) -> list[Any]:
+        """Use live statistics history where possible, then its persisted JSON."""
+        if self._context is not None:
+            getter = getattr(self._context, "get_plugin", None)
+            if callable(getter):
+                for plugin_name in ("Statistik", "Statistics"):
+                    try:
+                        statistics = getter(plugin_name)
+                        engine = getattr(statistics, "_engine", None) if statistics else None
+                        records = getattr(engine, "records", None) if engine else None
+                        if isinstance(records, list) and records:
+                            return records
+                    except Exception:
+                        self._log.debug("Kunde inte läsa statistikpluginets minne", exc_info=True)
+
+        paths: list[Path] = []
+        if self.config_path is not None:
+            paths.append(self.config_path / "statistics.json")
+            paths.append(self.config_path.parent / "statistics.json")
+        for history_path in paths:
+            try:
+                if not history_path.is_file():
+                    continue
+                payload = json.loads(history_path.read_text(encoding="utf-8"))
+                records = payload.get("records", []) if isinstance(payload, dict) else payload
+                if isinstance(records, list):
+                    return [record for record in records if isinstance(record, dict)]
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                self._log.warning("[CERTIFICATES] Intygshistorik kunde inte läsas: %s", exc)
+        return []
+
+    @staticmethod
+    def _history_value(record: Any, key: str, default: Any = "") -> Any:
+        if isinstance(record, dict):
+            return record.get(key, default)
+        return _result_value(record, key, default)
+
+    def _confirm_no_duplicate_registration(
+        self, template_name: str, values: dict[str, str]
+    ) -> bool:
+        registration = registration_from_values(values)
+        if not registration:
+            return True
+        duplicates = find_duplicate_certificates(
+            self._certificate_history_records(), template_name, registration
+        )
+        if not duplicates:
+            return True
+
+        lines: list[str] = []
+        for record in duplicates[:5]:
+            number = self._history_value(
+                record, "number", self._history_value(record, "id", "?")
+            )
+            created = self._history_value(
+                record, "created", self._history_value(record, "created_at", "")
+            )
+            filename = str(self._history_value(record, "filename", "") or "")
+            detail = f"• Intyg #{number}"
+            if created:
+                detail += f" — {created}"
+            if filename:
+                detail += f" — {filename}"
+            lines.append(detail)
+        if len(duplicates) > len(lines):
+            lines.append(f"• och {len(duplicates) - len(lines)} ytterligare träff(ar)")
+        answer = QMessageBox.question(
+            self._tab_widget,
+            "Intyg finns redan",
+            f"Det finns redan {len(duplicates)} intyg i historiken med registreringsnummer "
+            f"{registration} för mallen {template_name}.\n\n"
+            + "\n".join(lines)
+            + "\n\nVill du skapa ett till intyg ändå?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        self._evt(
+            "cert.duplicate_registration",
+            f"Dubblettvarning för {registration} ({template_name})",
+            registration=registration, template=template_name, matches=len(duplicates),
+            continued=answer == QMessageBox.StandardButton.Yes,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     @Slot()
     def _on_generate(self) -> None:
         name, template = self._selected_template()
@@ -1716,6 +1801,10 @@ class Plugin:
             return
         values = self._collect_values()
         if not self._validate_before_generation(template, values):
+            return
+        if not self._confirm_no_duplicate_registration(name, values):
+            self._evt("cert.generate_cancelled", "Generering avbruten efter dubblettvarning",
+                      level=logging.INFO, template=name)
             return
         missing = [_field_label(field.field_name) for field in self._field_widgets if not field.get_value()]
         if missing:
