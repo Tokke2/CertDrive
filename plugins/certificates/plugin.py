@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -60,7 +61,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
-    QSpacerItem,
     QVBoxLayout,
     QWidget,
 )
@@ -1343,50 +1343,66 @@ class Plugin:
         return frame
 
     def _build_action_row(self) -> QWidget:
+        """Keep every action reachable on narrow and high-DPI windows."""
         frame = QFrame()
-        layout = QHBoxLayout(frame)
+        layout = QVBoxLayout(frame)
         layout.setContentsMargins(0, self._sp(4), 0, 0)
-        layout.setSpacing(self._sp(6))
+        layout.setSpacing(self._sp(4))
+
+        buttons = QGridLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setHorizontalSpacing(self._sp(6))
+        buttons.setVerticalSpacing(self._sp(4))
 
         self._generate_button = QPushButton("🚀 Generera PDF", frame)
         self._generate_button.setMinimumHeight(self._sp(36))
         self._generate_button.setToolTip("Generera intyg (Ctrl+G)")
         self._generate_button.clicked.connect(self._on_generate)
-        layout.addWidget(self._generate_button)
+        buttons.addWidget(self._generate_button, 0, 0)
 
         self._batch_button = QPushButton("📦 Batch", frame)
         self._batch_button.setMinimumHeight(self._sp(36))
         self._batch_button.setToolTip("Batch-generering från CSV")
         self._batch_button.clicked.connect(self._on_batch_generate)
-        layout.addWidget(self._batch_button)
+        buttons.addWidget(self._batch_button, 0, 1)
 
         output = QPushButton("📂 Output", frame)
         output.setMinimumHeight(self._sp(36))
         output.setToolTip("Öppna outputmapp (Ctrl+O)")
         output.clicked.connect(self._open_output_folder)
-        layout.addWidget(output)
+        buttons.addWidget(output, 0, 2)
 
         clear = QPushButton("🗑️ Rensa", frame)
         clear.setMinimumHeight(self._sp(36))
         clear.setToolTip("Rensa fält (Ctrl+L)")
         clear.clicked.connect(self._clear_fields)
-        layout.addWidget(clear)
+        buttons.addWidget(clear, 1, 0)
 
         imported = QPushButton("📥 Import", frame)
         imported.setMinimumHeight(self._sp(36))
         imported.setToolTip("Importera befintliga PDF-intyg (Ctrl+I)")
         imported.clicked.connect(self._import_certificates)
-        layout.addWidget(imported)
+        buttons.addWidget(imported, 1, 1)
 
-        layout.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
+        for column in range(3):
+            buttons.setColumnStretch(column, 1)
+        for button in (self._generate_button, self._batch_button, output, clear, imported):
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        layout.addLayout(buttons)
+
+        progress_layout = QHBoxLayout()
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(self._sp(6))
         self._progress_bar = QProgressBar(frame)
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setFixedWidth(self._sp(170))
         self._progress_bar.setVisible(False)
-        layout.addWidget(self._progress_bar)
+        progress_layout.addWidget(self._progress_bar)
         self._progress_label = QLabel(frame)
-        self._progress_label.setMinimumWidth(self._sp(150))
-        layout.addWidget(self._progress_label)
+        self._progress_label.setWordWrap(True)
+        self._progress_label.setMinimumWidth(0)
+        progress_layout.addWidget(self._progress_label, stretch=1)
+        layout.addLayout(progress_layout)
         self._set_action_buttons_enabled(False)
         return frame
 
