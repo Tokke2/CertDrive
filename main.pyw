@@ -14,7 +14,7 @@ Appversion 0.0.1 (versionsnumret ändras endast på uttrycklig begäran)
    (pip i bakgrundstråd, dep.*-loggad), "🌐 Office-alternativ" (webb +
    kopierbart winget/brew/apt-kommando), "Senare", "Visa inte igen".
 2. 2000000% BÄTTRE AUTOSTART: AutostartGuard — självläkande multi-OS
-   (Windows-registret med pythonw, macOS LaunchAgent, Linux XDG .desktop),
+   (Windows-genväg med appikon, macOS LaunchAgent, Linux XDG .desktop),
    verify-after-write + repair, autostart.*-events.
 3. ADAPTIV UI: alla fasta pixelmått skalas med fontmetrik via _scale()
    (§17/§30); radbrytning på header-undertext.
@@ -224,7 +224,7 @@ class AutostartGuard:
     """Självläkande multi-OS-autostart (10.8.0, '2000000% bättre').
 
     Installerar, verifierar (verify-after-write) och reparerar autostart-posten
-    på Windows (HKCU Run + pythonw), macOS (LaunchAgent) och Linux (XDG
+    på Windows (genväg med IntygsDrive-ikon), macOS (LaunchAgent) och Linux (XDG
     .desktop). Allt loggas med autostart.*-events; fel är icke-kritiska.
     """
 
@@ -267,39 +267,58 @@ class AutostartGuard:
             _evt("autostart.failed", f"Autostart-fel: {exc}",
                  level=logging.ERROR, error=f"{type(exc).__name__}: {exc}")
 
-    # ── Windows: registret ────────────────────────────────────────────────
+    # ── Windows: genväg med IntygsDrive-ikon ──────────────────────────────
     def _windows(self) -> None:
         import winreg
+        from core.config import (
+            _create_windows_startup_shortcut,
+            _remove_windows_startup_shortcut,
+            _windows_startup_shortcut_path,
+        )
 
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
-            if not self.enabled:
-                try:
+        if not self.enabled:
+            removed = _remove_windows_startup_shortcut()
+            with suppress(OSError):
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE
+                ) as key:
                     winreg.DeleteValue(key, self.ENTRY)
-                    _evt("autostart.removed", "Autostart borttagen (Windows)")
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    _evt("autostart.remove_failed", f"Kunde inte ta bort autostart: {exc}",
-                         level=logging.WARNING, error=str(exc))
-                return
-            command = self._command()
-            current: Any = None
-            try:
-                current, _ = winreg.QueryValueEx(key, self.ENTRY)
-            except OSError:
-                current = None
-            if current == command:
-                _evt("autostart.verified", "Autostart redan korrekt (Windows)",
-                     level=logging.DEBUG)
-                return
-            winreg.SetValueEx(key, self.ENTRY, 0, winreg.REG_SZ, command)
-            again, _ = winreg.QueryValueEx(key, self.ENTRY)
-            if again == command:
-                _evt("autostart.installed", "Autostart installerad + verifierad (Windows)")
-            else:
-                _evt("autostart.verify_failed", "Autostart skrevs men verifierades inte (Windows)",
-                     level=logging.WARNING)
+            _evt(
+                "autostart.removed",
+                "Autostart borttagen (Windows)",
+                level=logging.INFO if removed else logging.WARNING,
+                shortcut=str(_windows_startup_shortcut_path()),
+            )
+            return
+
+        args = self._program_arguments()
+        icon_path = APP_PATH / FOLDER_ICONS / "icon.ico"
+        if not args or not icon_path.is_file():
+            _evt("autostart.icon_missing", "Autostart-genväg saknar appkommando eller Icon/icon.ico",
+                 level=logging.ERROR, icon=str(icon_path))
+            return
+        created = _create_windows_startup_shortcut(
+            target=args[0],
+            arguments=subprocess.list2cmdline(args[1:]),
+            working_directory=str(APP_PATH),
+            icon_path=str(icon_path),
+        )
+        if not created:
+            _evt("autostart.shortcut_failed", "Kunde inte skapa Windows-autostartgenväg",
+                 level=logging.ERROR, shortcut=str(_windows_startup_shortcut_path()))
+            return
+        with suppress(OSError):
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE
+            ) as key:
+                winreg.DeleteValue(key, self.ENTRY)
+        _evt(
+            "autostart.installed",
+            "Windows-autostartgenväg skapad med IntygsDrive-ikonen",
+            shortcut=str(_windows_startup_shortcut_path()),
+            icon=str(icon_path),
+        )
 
     # ── macOS: LaunchAgent ────────────────────────────────────────────────
     def _macos(self) -> None:
@@ -381,7 +400,7 @@ def _configure_platform() -> None:
             import ctypes
 
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "RickardLangkvist.Intygsgenerator"
+                "RickardLangkvist.IntygsDrive"
             )
         except (AttributeError, OSError) as exc:
             _logger.debug("Kunde inte sätta Windows AppUserModelID: %s", exc)

@@ -24,6 +24,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import threading
 from contextlib import suppress
@@ -835,6 +836,68 @@ SettingsManager = ConfigManager
 # ─── AutostartManager ───────────────────────────────────────────────────────
 
 
+_WINDOWS_SHORTCUT_NAME = "IntygsDrive.lnk"
+
+
+def _windows_startup_folder() -> Path:
+    roaming = os.environ.get("APPDATA")
+    base = Path(roaming) if roaming else Path.home() / "AppData" / "Roaming"
+    return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+
+
+def _windows_startup_shortcut_path() -> Path:
+    return _windows_startup_folder() / _WINDOWS_SHORTCUT_NAME
+
+
+def _ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _create_windows_startup_shortcut(
+    target: str,
+    arguments: str,
+    working_directory: str,
+    icon_path: str,
+) -> bool:
+    """Create a branded Startup-folder shortcut instead of exposing pythonw's icon."""
+    shortcut = _windows_startup_shortcut_path()
+    shortcut.parent.mkdir(parents=True, exist_ok=True)
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$shell = New-Object -ComObject WScript.Shell; "
+        f"$link = $shell.CreateShortcut({_ps_quote(str(shortcut))}); "
+        f"$link.TargetPath = {_ps_quote(target)}; "
+        f"$link.Arguments = {_ps_quote(arguments)}; "
+        f"$link.WorkingDirectory = {_ps_quote(working_directory)}; "
+        f"$link.IconLocation = {_ps_quote(icon_path + ',0')}; "
+        "$link.Save()"
+    )
+    try:
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return shortcut.is_file()
+    except (OSError, subprocess.SubprocessError) as exc:
+        logging.getLogger(f"{__name__}.AutostartManager").error(
+            "[Autostart] Kunde inte skapa Windows-genväg: %s", exc
+        )
+        return False
+
+
+def _remove_windows_startup_shortcut() -> bool:
+    shortcut = _windows_startup_shortcut_path()
+    try:
+        shortcut.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 class AutostartManager:
     """Hanterar autostart med OS."""
 
@@ -920,12 +983,11 @@ class AutostartManager:
         self.set_enabled(new_state)
         return new_state
 
-    def get_command(self) -> str:
-        """Returnera startkommando. Windows använder pythonw.exe när möjligt."""
+    def _program_arguments(self) -> list[str]:
         if PlatformHelper.is_frozen():
             with suppress(Exception):
-                return f'"{PlatformHelper.get_executable_path()}"'
-            return f'"{sys.executable}"'
+                return [str(PlatformHelper.get_executable_path())]
+            return [str(sys.executable)]
 
         script: Path | None = None
         with suppress(Exception):
@@ -933,13 +995,17 @@ class AutostartManager:
         if script is None:
             script = Path(sys.argv[0]).resolve()
 
-        python = sys.executable
+        interpreter = sys.executable
         if _is_windows():
-            pythonw = Path(python).parent / "pythonw.exe"
-            if pythonw.exists():
-                python = str(pythonw)
+            pythonw = Path(interpreter).parent / "pythonw.exe"
+            if pythonw.is_file():
+                interpreter = str(pythonw)
+        return [interpreter, str(script)]
 
-        return f'"{python}" "{script}"'
+    def get_command(self) -> str:
+        """Returnera startkommando; Windows-genvägen får appens egen ikon."""
+        args = self._program_arguments()
+        return subprocess.list2cmdline(args) if _is_windows() else shlex.join(args)
 
     def _enable_system(self) -> bool:
         try:
@@ -966,6 +1032,8 @@ class AutostartManager:
             return True
 
     def _is_enabled_windows(self) -> bool:
+        if _windows_startup_shortcut_path().is_file():
+            return True
         try:
             import winreg
 
@@ -984,28 +1052,40 @@ class AutostartManager:
 
     def _enable_windows(self) -> bool:
         try:
-            import winreg
-
-            command = self.get_command()
-            if not command:
+            args = self._program_arguments()
+            icon_path = self.app_path / FOLDER_ICONS / "icon.ico"
+            if not args or not icon_path.is_file():
+                self._log.error("[Autostart] Windows shortcut needs app command and Icon/icon.ico")
                 return False
-
-            key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER, self._REG_KEY, 0, winreg.KEY_SET_VALUE
+            created = _create_windows_startup_shortcut(
+                target=args[0],
+                arguments=subprocess.list2cmdline(args[1:]),
+                working_directory=str(self.app_path),
+                icon_path=str(icon_path),
             )
-            try:
-                winreg.SetValueEx(key, self.app_name, 0, winreg.REG_SZ, command)
-                self._log.debug(
-                    "[Autostart] Windows: %s = %s", self.app_name, command
+            if not created:
+                return False
+            # Remove old Run-key entries so the shortcut launches only one copy.
+            with suppress(Exception):
+                import winreg
+
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER, self._REG_KEY, 0, winreg.KEY_SET_VALUE
                 )
-                return True
-            finally:
-                winreg.CloseKey(key)
+                try:
+                    for value_name in {self.app_name, "Intygsgenerator"}:
+                        with suppress(FileNotFoundError):
+                            winreg.DeleteValue(key, value_name)
+                finally:
+                    winreg.CloseKey(key)
+            self._log.info("[Autostart] Windows Startup-genväg: %s", _windows_startup_shortcut_path())
+            return True
         except Exception as exc:
             self._log.error("[Autostart] Windows enable: %s", exc)
             return False
 
     def _disable_windows(self) -> bool:
+        shortcut_removed = _remove_windows_startup_shortcut()
         try:
             import winreg
 
@@ -1013,11 +1093,14 @@ class AutostartManager:
                 winreg.HKEY_CURRENT_USER, self._REG_KEY, 0, winreg.KEY_SET_VALUE
             )
             try:
-                with suppress(FileNotFoundError):
-                    winreg.DeleteValue(key, self.app_name)
+                for value_name in {self.app_name, "Intygsgenerator"}:
+                    with suppress(FileNotFoundError):
+                        winreg.DeleteValue(key, value_name)
             finally:
                 winreg.CloseKey(key)
-            return True
+            return shortcut_removed
+        except FileNotFoundError:
+            return shortcut_removed
         except Exception as exc:
             self._log.error("[Autostart] Windows disable: %s", exc)
             return False

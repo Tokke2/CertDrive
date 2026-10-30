@@ -713,6 +713,12 @@ class AutostartManager:
         return " ".join(parts)
 
     def _is_enabled_windows(self) -> bool:
+        try:
+            from core.config import _windows_startup_shortcut_path
+            if _windows_startup_shortcut_path().is_file():
+                return True
+        except Exception:
+            pass
         import winreg  # type: ignore[import-not-found]
 
         try:
@@ -724,9 +730,7 @@ class AutostartManager:
                 winreg.KEY_READ,
             )
             try:
-                winreg.QueryValueEx(
-                    key, self._app_name
-                )
+                winreg.QueryValueEx(key, self._app_name)
                 return True
             except FileNotFoundError:
                 return False
@@ -736,47 +740,65 @@ class AutostartManager:
             return False
 
     def _enable_windows(self) -> bool:
-        import winreg  # type: ignore[import-not-found]
-
         try:
-            key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows"
-                r"\CurrentVersion\Run",
-                0,
-                winreg.KEY_SET_VALUE,
+            from core.config import _create_windows_startup_shortcut
+
+            args = [self._app_path, *self._app_args]
+            script = next((Path(arg) for arg in self._app_args if arg.casefold().endswith((".py", ".pyw"))), None)
+            app_root = script.resolve().parent if script is not None else Path(self._app_path).resolve().parent
+            icon_path = app_root / "Icon" / "icon.ico"
+            if not icon_path.is_file():
+                return False
+            created = _create_windows_startup_shortcut(
+                target=args[0],
+                arguments=subprocess.list2cmdline(args[1:]),
+                working_directory=str(app_root),
+                icon_path=str(icon_path),
             )
-            winreg.SetValueEx(
-                key,
-                self._app_name,
-                0,
-                winreg.REG_SZ,
-                self._build_command_windows(),
-            )
-            winreg.CloseKey(key)
+            if not created:
+                return False
+            import winreg  # type: ignore[import-not-found]
+            with suppress(Exception):
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                    0,
+                    winreg.KEY_SET_VALUE,
+                )
+                try:
+                    for value_name in {self._app_name, "Intygsgenerator"}:
+                        with suppress(FileNotFoundError):
+                            winreg.DeleteValue(key, value_name)
+                finally:
+                    winreg.CloseKey(key)
             return True
         except Exception:
+            _logger.exception("[SETTINGS] Kunde inte skapa autostartgenväg med appikon")
             return False
 
     def _disable_windows(self) -> bool:
-        import winreg  # type: ignore[import-not-found]
-
         try:
+            from core.config import _remove_windows_startup_shortcut
+            shortcut_removed = _remove_windows_startup_shortcut()
+        except Exception:
+            shortcut_removed = False
+        try:
+            import winreg  # type: ignore[import-not-found]
             key = winreg.OpenKey(
                 winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows"
-                r"\CurrentVersion\Run",
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
                 0,
                 winreg.KEY_SET_VALUE,
             )
             try:
-                winreg.DeleteValue(
-                    key, self._app_name
-                )
-            except FileNotFoundError:
-                pass
-            winreg.CloseKey(key)
-            return True
+                for value_name in {self._app_name, "Intygsgenerator"}:
+                    with suppress(FileNotFoundError):
+                        winreg.DeleteValue(key, value_name)
+            finally:
+                winreg.CloseKey(key)
+            return shortcut_removed
+        except FileNotFoundError:
+            return shortcut_removed
         except Exception:
             return False
 
