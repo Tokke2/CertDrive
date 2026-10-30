@@ -77,11 +77,19 @@ class ReleaseVersionTests(unittest.TestCase):
             update = check_latest_release("0.0.1")
         self.assertEqual(update.commit_sha, commit)
 
-    def test_matching_current_commit_is_not_an_update(self):
-        payload = {"tag_name": "v0.0.1", "draft": False, "prerelease": False}
+    def test_matching_current_commit_still_checks_rolling_release_files(self):
+        payload = {
+            "tag_name": "v0.0.1",
+            "name": "IntygsDrive 0.0.1",
+            "html_url": "https://github.com/Tokke2/CertDrive/releases/tag/v0.0.1",
+            "draft": False,
+            "prerelease": False,
+        }
         commit = "e" * 40
         with patch("core.updater._request_json", side_effect=[payload, {"sha": commit}]):
-            self.assertIsNone(check_latest_release("0.0.1", current_commit=commit))
+            update = check_latest_release("0.0.1", current_commit=commit)
+        self.assertIsNotNone(update)
+        self.assertEqual(update.commit_sha, commit)
 
 
 def _zipball(files: dict[str, bytes]) -> bytes:
@@ -123,6 +131,28 @@ class AutomaticUpdateStagingTests(unittest.TestCase):
             self.assertEqual((root / "Mallar" / "kund.docx").read_bytes(), b"user template")
             self.assertEqual(get_current_commit(root), "a" * 40)
             self.assertFalse((root / "js" / ".update-staging").exists())
+
+    def test_same_commit_with_local_file_drift_stages_release_contents(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "core").mkdir()
+            (root / "js").mkdir()
+            (root / "main.pyw").write_bytes(b"locally changed main")
+            (root / "core" / "module.py").write_bytes(b"same module")
+            commit = "e" * 40
+            (root / "js" / "update_state.json").write_text(
+                json.dumps({"version": "v0.0.1", "commit_sha": commit}),
+                encoding="utf-8",
+            )
+            release = ReleaseUpdate("v0.0.1", "IntygsDrive 0.0.1", "", "", commit)
+
+            result = stage_release_archive(root, release, _zipball({
+                "main.pyw": b"release main",
+                "core/module.py": b"same module",
+            }))
+
+            self.assertEqual(get_current_commit(root), commit)
+            self.assertTrue(result.staged)
 
     def test_matching_source_archive_records_commit_without_staging(self):
         with tempfile.TemporaryDirectory() as temp:

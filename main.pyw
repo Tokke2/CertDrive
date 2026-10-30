@@ -2181,11 +2181,12 @@ class Application:
                  level=logging.DEBUG, version=release.version, commit=release.commit_sha)
             return
 
-        _evt("update.staged", "Nyare release hämtad och väntar på att appen stängs",
+        _evt("update.staged", "Nyare appkod hämtad och väntar på att appen stängs",
              version=release.version, commit=release.commit_sha)
         if self.window is not None and not self._exit_requested:
             self.window.status_signal.emit(
-                f"⬇ Uppdatering {release.version} hämtad — installeras automatiskt när appen stängs."
+                f"⬇ Ny appkod ({release.version}, commit {release.commit_sha[:7]}) hämtad — "
+                "installeras automatiskt när appen stängs."
             )
 
     def _log_startup_summary(self) -> None:

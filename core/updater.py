@@ -124,10 +124,11 @@ def check_latest_release(
     current_commit: str | None = None,
     timeout: float = 4.0,
 ) -> ReleaseUpdate | None:
-    """Return a newer release or changed code published under the same version.
+    """Return the latest eligible release, including rolling releases at same version.
 
-    When the local build has no commit identity, callers compare the downloaded
-    source archive with local runtime files before deciding whether to install.
+    The archive stage compares the actual installed runtime files against the
+    release contents, even if commit identities match, so local file drift is
+    repaired instead of being hidden by a matching version or SHA.
     """
     current = _version_key(current_version)
     if current is None:
@@ -148,10 +149,8 @@ def check_latest_release(
     release_commit = str(commit_payload.get("sha", "")).strip().lower()
     if not _COMMIT_RE.fullmatch(release_commit):
         raise ValueError("GitHub kunde inte ange commit för releasetaggen")
-    installed_commit = (current_commit or "").strip().lower()
-    if latest == current and installed_commit == release_commit:
-        return None
-
+    # The version is intentionally rolling. Do not short-circuit on a matching
+    # SHA: local runtime files may still differ and must be compared in archive.
     release_url = str(payload.get("html_url", ""))
     if not release_url.startswith(f"https://github.com/{REPOSITORY}/releases/"):
         release_url = RELEASES_PAGE
