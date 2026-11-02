@@ -1185,8 +1185,9 @@ class Plugin:
         layout.addWidget(self._label_mapping_combo, stretch=1)
         self._label_print_checkbox = QCheckBox("Skriv etikett automatiskt", frame)
         self._label_print_checkbox.setToolTip(
-            "Skriv ut etiketten som är kopplad till intygsmallen efter att intyget skapats."
+            "Skriv alltid ut etiketten som är kopplad till intygsmallen efter att intyget skapats."
         )
+        self._label_print_checkbox.toggled.connect(self._on_label_print_toggled)
         self._label_print_checkbox.setEnabled(False)
         layout.addWidget(self._label_print_checkbox)
         self._refresh_label_mapping_combo(self._last_selected_name)
@@ -1274,6 +1275,23 @@ class Plugin:
             self._set_status(f"Ingen etikettmall vald för {template_name}")
         self._update_label_print_option()
 
+    @Slot(bool)
+    def _on_label_print_toggled(self, checked: bool) -> None:
+        """Keep automatic label printing enabled whenever it can be performed."""
+        if checked:
+            return
+        checkbox = self._label_print_checkbox
+        if checkbox is None:
+            return
+        template_name, _template = self._selected_template()
+        if not self._mapped_label_path(template_name) or not _labels.bpac_available():
+            return
+        checkbox.blockSignals(True)
+        try:
+            checkbox.setChecked(True)
+        finally:
+            checkbox.blockSignals(False)
+
     def _update_label_print_option(self) -> None:
         checkbox = self._label_print_checkbox
         if checkbox is None:
@@ -1282,8 +1300,8 @@ class Plugin:
         mapped_label = self._mapped_label_path(template_name)
         can_print = bool(mapped_label and _labels.bpac_available())
         checkbox.setEnabled(can_print)
+        checkbox.setChecked(can_print)
         if mapped_label is None:
-            checkbox.setChecked(False)
             checkbox.setToolTip(
                 f"Välj en etikettmall för intygsmallen {template_name} först."
                 if template_name else "Välj en intygsmall och koppla en etikettmall först."
@@ -1292,7 +1310,7 @@ class Plugin:
             checkbox.setToolTip("Automatisk utskrift kräver Windows och Brother b-PAC.")
         else:
             checkbox.setToolTip(
-                f"Skriv ut {mapped_label.name} efter att intyget har skapats."
+                f"{mapped_label.name} skrivs alltid ut efter att intyget har skapats."
             )
 
     def _refresh_customer_combo(self, selected_id: str | None = None) -> None:
