@@ -2016,6 +2016,7 @@ class Application:
             ("status.message", self._on_status_message),
             ("error.occurred", self._on_error_event),
             ("refresh_ui", self._on_refresh_ui),
+            ("update.check_now", self._on_update_check_requested),
         )
         for event_name, handler in event_map:
             try:
@@ -2350,6 +2351,9 @@ class Application:
     def _on_refresh_ui(self, _data: Any = None) -> None:
         if self.window is not None:
             self.window._refresh_statusbar()
+
+    def _on_update_check_requested(self, _data: Any = None) -> None:
+        QTimer.singleShot(0, lambda: self._start_release_check(manual=True))
 
     def _cleanup(self) -> None:
         if self._cleanup_done:

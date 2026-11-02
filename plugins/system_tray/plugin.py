@@ -63,6 +63,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QStyle,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -692,6 +693,14 @@ class Plugin:
         menu.addMenu(self._recent_menu)
         self._refresh_recent_menu()
         menu.addSeparator()
+        update_action = QAction(
+            QApplication.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload),
+            "Sök efter uppdateringar",
+            menu,
+        )
+        update_action.triggered.connect(self._on_check_updates)
+        menu.addAction(update_action)
+        menu.addSeparator()
         quit_action = QAction("Avsluta", menu)
         quit_action.triggered.connect(self._on_quit)
         menu.addAction(quit_action)
@@ -1142,6 +1151,9 @@ class Plugin:
 
     def _on_show_settings_event(self, data: Any) -> None:
         self._on_show_window()
+
+    def _on_check_updates(self, _checked: bool = False) -> None:
+        self._emit_event("update.check_now", {"source": "system_tray"})
 
     # ── Senaste intyg ─────────────────────────────────────────────────────
 
