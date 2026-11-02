@@ -146,10 +146,12 @@ class FieldsScrollArea(QScrollArea):
         self.scroll_to_top()
 
     def _column_count(self) -> int:
+        # Use logical widget width directly: scaling these breakpoints with the
+        # font metric made the two-column layout disappear at 125%/150% DPI.
         width = max(self.viewport().width(), self.width())
-        if width >= _sp(1120):
+        if width >= 1080:
             return 3
-        if width >= _sp(620):
+        if width >= 520:
             return 2
         return 1
 
