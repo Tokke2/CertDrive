@@ -41,8 +41,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence, QShortcut
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, QSize, Signal, Slot
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QInputDialog,
     QApplication,
@@ -61,6 +61,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -521,6 +522,18 @@ class Plugin:
         except Exception:
             pass
         return base
+
+    def _standard_icon(self, name: str) -> QIcon:
+        """Get a native button icon, falling back to the shared app icon."""
+        try:
+            pixmap = getattr(QStyle.StandardPixmap, name)
+            icon = QApplication.style().standardIcon(pixmap)
+            if not icon.isNull():
+                return icon
+        except Exception:
+            pass
+        app_icon = Path(__file__).resolve().parents[2] / "Icon" / "icon.svg"
+        return QIcon(str(app_icon))
 
     def _evt(self, event: str, msg: str, level: int = logging.INFO, **ctx: Any) -> None:
         """Strukturerad loggpost (cert.*) — får aldrig krascha appen."""
@@ -1141,13 +1154,17 @@ class Plugin:
         self._template_combo.currentTextChanged.connect(self._on_template_selected)
         layout.addWidget(self._template_combo, stretch=1)
 
-        refresh = QPushButton("🔄", frame)
+        refresh = QPushButton(frame)
+        refresh.setIcon(self._standard_icon("SP_BrowserReload"))
+        refresh.setIconSize(QSize(self._sp(16), self._sp(16)))
         refresh.setFixedSize(self._sp(24), self._sp(24))
         refresh.setToolTip("Skanna mallar igen (F5)")
         refresh.clicked.connect(self.refresh_templates)
         layout.addWidget(refresh)
 
-        open_templates = QPushButton("📂", frame)
+        open_templates = QPushButton(frame)
+        open_templates.setIcon(self._standard_icon("SP_DirOpenIcon"))
+        open_templates.setIconSize(QSize(self._sp(16), self._sp(16)))
         open_templates.setFixedSize(self._sp(24), self._sp(24))
         open_templates.setToolTip("Öppna mallmappen")
         open_templates.clicked.connect(self._open_templates_folder)
@@ -1436,31 +1453,41 @@ class Plugin:
         buttons.setHorizontalSpacing(self._sp(4))
         buttons.setVerticalSpacing(self._sp(0))
 
-        self._generate_button = QPushButton("🚀 Generera PDF", frame)
+        self._generate_button = QPushButton("Generera PDF", frame)
+        self._generate_button.setIcon(self._standard_icon("SP_DialogSaveButton"))
+        self._generate_button.setIconSize(QSize(self._sp(16), self._sp(16)))
         self._generate_button.setMinimumHeight(self._sp(25))
         self._generate_button.setToolTip("Generera intyg (Ctrl+G)")
         self._generate_button.clicked.connect(self._on_generate)
         buttons.addWidget(self._generate_button, 0, 0)
 
-        self._batch_button = QPushButton("📦 Batch", frame)
+        self._batch_button = QPushButton("Batch", frame)
+        self._batch_button.setIcon(self._standard_icon("SP_FileDialogListView"))
+        self._batch_button.setIconSize(QSize(self._sp(16), self._sp(16)))
         self._batch_button.setMinimumHeight(self._sp(25))
         self._batch_button.setToolTip("Batch-generering från CSV")
         self._batch_button.clicked.connect(self._on_batch_generate)
         buttons.addWidget(self._batch_button, 0, 1)
 
-        output = QPushButton("📂 Output", frame)
+        output = QPushButton("Output", frame)
+        output.setIcon(self._standard_icon("SP_DirOpenIcon"))
+        output.setIconSize(QSize(self._sp(16), self._sp(16)))
         output.setMinimumHeight(self._sp(25))
         output.setToolTip("Öppna outputmapp (Ctrl+O)")
         output.clicked.connect(self._open_output_folder)
         buttons.addWidget(output, 0, 2)
 
-        clear = QPushButton("🗑️ Rensa", frame)
+        clear = QPushButton("Rensa", frame)
+        clear.setIcon(self._standard_icon("SP_TrashIcon"))
+        clear.setIconSize(QSize(self._sp(16), self._sp(16)))
         clear.setMinimumHeight(self._sp(25))
         clear.setToolTip("Rensa fält (Ctrl+L)")
         clear.clicked.connect(self._clear_fields)
         buttons.addWidget(clear, 0, 3)
 
-        imported = QPushButton("📥 Import", frame)
+        imported = QPushButton("Import", frame)
+        imported.setIcon(self._standard_icon("SP_DialogOpenButton"))
+        imported.setIconSize(QSize(self._sp(16), self._sp(16)))
         imported.setMinimumHeight(self._sp(25))
         imported.setToolTip("Importera befintliga PDF-intyg (Ctrl+I)")
         imported.clicked.connect(self._import_certificates)
