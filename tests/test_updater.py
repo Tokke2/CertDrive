@@ -122,7 +122,12 @@ class AutomaticUpdateStagingTests(unittest.TestCase):
 
             staged = stage_release_archive(root, release, archive)
             self.assertTrue(staged.staged)
-            self.assertTrue(run_update_helper(root, -12345, wait_timeout=0.01))
+            with patch("core.updater.subprocess.Popen") as restart:
+                self.assertTrue(run_update_helper(root, -12345, wait_timeout=0.01))
+            restart.assert_called_once()
+            command = restart.call_args.args[0]
+            self.assertEqual(Path(command[1]), root / "main.pyw")
+            self.assertEqual(restart.call_args.kwargs["cwd"], str(root))
 
             self.assertEqual((root / "main.pyw").read_text(encoding="utf-8"), "new main")
             self.assertEqual((root / "core" / "module.py").read_text(encoding="utf-8"), "new code")

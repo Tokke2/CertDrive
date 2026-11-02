@@ -401,8 +401,37 @@ def _append_helper_log(root: Path, message: str) -> None:
         pass
 
 
+def _restart_updated_app(root: Path) -> bool:
+    """Start the updated source app in a detached process after installation."""
+    entrypoint = root / "main.pyw"
+    if not entrypoint.is_file():
+        _append_helper_log(root, "Automatic restart skipped: main.pyw was not found.")
+        return False
+    options: dict[str, object] = {
+        "cwd": str(root),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        options["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    else:
+        options["start_new_session"] = True
+    try:
+        subprocess.Popen([sys.executable, str(entrypoint)], **options)
+    except OSError as exc:
+        _append_helper_log(root, f"Automatic restart failed: {type(exc).__name__}: {exc}")
+        return False
+    _append_helper_log(root, "Automatically restarted the updated app.")
+    return True
+
+
 def run_update_helper(root: Path | str, parent_pid: int, *, wait_timeout: float = 48 * 60 * 60) -> bool:
-    """Wait for the app to close, then atomically apply the staged source update."""
+    """Wait for the app to close, apply the staged update, then restart it."""
     app_root = Path(root).resolve()
     deadline = time.monotonic() + max(1.0, wait_timeout)
     while _pid_is_running(int(parent_pid)) and time.monotonic() < deadline:
@@ -455,4 +484,5 @@ def run_update_helper(root: Path | str, parent_pid: int, *, wait_timeout: float 
     staging_root = app_root / "js" / _STAGING_NAME
     shutil.rmtree(staging_root, ignore_errors=True)
     _append_helper_log(app_root, f"Installed {release.version} ({release.commit_sha}).")
+    _restart_updated_app(app_root)
     return True
