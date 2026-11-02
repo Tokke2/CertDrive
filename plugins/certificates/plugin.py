@@ -70,6 +70,12 @@ from . import labels as _labels
 from .customers import Customer, load_customers, save_customers
 from .history import find_duplicate_certificates, registration_from_values
 from .label_mappings import load_label_mappings, save_label_mappings
+from .printer_settings import (
+    default_printer,
+    installed_printers,
+    load_printer_name,
+    save_printer_name,
+)
 from .view import (
     COPYRIGHT,
     EngineErrorWidget,
@@ -369,18 +375,32 @@ class _GenerationWorker(QRunnable):
 class _LabelWorker(QRunnable):
     """Skriver ut en .lbx-etikett via b-PAC i bakgrundstråd (10.4.0)."""
 
-    def __init__(self, label_path: Path, copies: int, values: dict[str, str]) -> None:
+    def __init__(
+        self,
+        label_path: Path,
+        copies: int,
+        values: dict[str, str],
+        printer_name: str = "",
+    ) -> None:
         super().__init__()
         self._label_path = label_path
         self._copies = copies
         self._values = values
+        self._printer_name = printer_name
         self.signals = _WorkerSignals()
         self.setAutoDelete(True)
 
     @Slot()
     def run(self) -> None:
         try:
-            self.signals.finished.emit(_labels.print_label(self._label_path, self._copies, self._values))
+            self.signals.finished.emit(
+                _labels.print_label(
+                    self._label_path,
+                    self._copies,
+                    self._values,
+                    printer_name=self._printer_name,
+                )
+            )
         except Exception as exc:
             _logger.exception("[CERTIFICATES] Etikettutskrift kraschade")
             self.signals.error.emit(str(exc))
@@ -478,8 +498,10 @@ class Plugin:
         self.config_path: Path | None = None
         self.customers_path: Path | None = None
         self.label_mappings_path: Path | None = None
+        self.label_printer_settings_path: Path | None = None
         self._customers: list[Customer] = []
         self._label_mappings: dict[str, str] = {}
+        self._label_printer_name = ""
         self._counter_manager: Any | None = None
         self._pdf_converter: Any | None = None
         self._generator: Any | None = None
@@ -500,6 +522,7 @@ class Plugin:
         self._batch_button: QPushButton | None = None
         self._customer_combo: QComboBox | None = None
         self._label_mapping_combo: QComboBox | None = None
+        self._label_printer_button: QPushButton | None = None
         self._label_print_checkbox: QCheckBox | None = None
         self._pending_label_print = False
         self._pending_template_name = ""
@@ -638,6 +661,8 @@ class Plugin:
         self.config_path = self._context_path("config", base / _CONFIG_ROOT_NAME)
         self.customers_path = self.config_path / "customers.json"
         self.label_mappings_path = self.config_path / "certificate_label_mappings.json"
+        self.label_printer_settings_path = self.config_path / "label_printer.json"
+        self._label_printer_name = load_printer_name(self.label_printer_settings_path)
         self.templates_path = self._diagnose_templates_path(base, self.templates_path)
 
         for path in (self.templates_path, self.output_path, self.config_path):
@@ -1190,8 +1215,97 @@ class Plugin:
         self._label_print_checkbox.toggled.connect(self._on_label_print_toggled)
         self._label_print_checkbox.setEnabled(False)
         layout.addWidget(self._label_print_checkbox)
+        self._label_printer_button = QPushButton(frame)
+        self._label_printer_button.setIcon(self._standard_icon("SP_PrinterIcon"))
+        self._label_printer_button.setIconSize(QSize(self._sp(16), self._sp(16)))
+        self._label_printer_button.clicked.connect(self._choose_label_printer)
+        layout.addWidget(self._label_printer_button)
         self._refresh_label_mapping_combo(self._last_selected_name)
+        self._refresh_label_printer_button()
         return frame
+
+    def _refresh_label_printer_button(self) -> None:
+        button = self._label_printer_button
+        if button is None:
+            return
+        selected = self._label_printer_name or "Windows standard"
+        compact_name = selected if len(selected) <= 20 else f"{selected[:19]}…"
+        button.setText(f"Skrivare: {compact_name}")
+        button.setMaximumWidth(self._sp(220))
+        button.setToolTip(
+            f"Vald etikettskrivare: {selected}. Klicka för att välja en annan Windows-skrivare. "
+            "Skrivaren och dess drivrutin måste först vara installerade i Windows."
+        )
+
+    def _choose_label_printer(self) -> None:
+        printers = installed_printers()
+        system_default = default_printer()
+        if system_default and system_default.casefold() not in {name.casefold() for name in printers}:
+            printers.append(system_default)
+            printers.sort(key=str.casefold)
+        if not printers and not self._label_printer_name:
+            QMessageBox.information(
+                self._tab_widget,
+                "Etikettskrivare",
+                "Inga skrivare hittades i Windows. Installera skrivaren och dess drivrutin "
+                "i Windows först och välj sedan Skrivare igen.\n\n"
+                "För Brother .lbx-etiketter krävs även Brother b-PAC.",
+            )
+            return
+
+        choices: list[tuple[str, str]] = [
+            (
+                f"Windows standardskrivare ({system_default})"
+                if system_default else "Windows standardskrivare",
+                "",
+            )
+        ]
+        choices.extend((name, name) for name in printers)
+        if self._label_printer_name and self._label_printer_name.casefold() not in {
+            name.casefold() for name in printers
+        }:
+            choices.append((f"{self._label_printer_name} (inte hittad)", self._label_printer_name))
+        labels = [label for label, _name in choices]
+        selected_index = next(
+            (index for index, (_label, name) in enumerate(choices)
+             if name.casefold() == self._label_printer_name.casefold()),
+            0,
+        )
+        selected, accepted = QInputDialog.getItem(
+            self._tab_widget,
+            "Välj etikettskrivare",
+            "Välj en skrivare installerad i Windows. Brother .lbx kräver Brother b-PAC:",
+            labels,
+            selected_index,
+            False,
+        )
+        if not accepted:
+            return
+        printer_name = choices[labels.index(selected)][1]
+        if self.label_printer_settings_path is not None:
+            try:
+                save_printer_name(self.label_printer_settings_path, printer_name)
+            except OSError as exc:
+                QMessageBox.warning(
+                    self._tab_widget,
+                    "Etikettskrivare",
+                    f"Skriverval kunde inte sparas: {exc}",
+                )
+                self._evt(
+                    "label.printer_save_failed",
+                    f"Skriverval kunde inte sparas: {exc}",
+                    level=logging.ERROR,
+                    error=str(exc),
+                )
+                return
+        self._label_printer_name = printer_name
+        self._refresh_label_printer_button()
+        selected_name = printer_name or "Windows standardskrivare"
+        self._evt(
+            "label.printer_selected",
+            f"Etikettskrivare vald: {selected_name}",
+            printer=selected_name,
+        )
 
     def _refresh_label_mapping_combo(self, template_name: str) -> None:
         combo = self._label_mapping_combo
@@ -2149,10 +2263,17 @@ class Plugin:
         self._start_label_print(chosen, copies, dict(self._last_values))
 
     def _start_label_print(self, chosen: Path, copies: int, values: dict[str, str]) -> None:
-        self._evt("label.print_started", f"Skriver ut {copies} × {chosen.name}",
-                  label=chosen.name, copies=copies)
-        self._set_status(f"🏷️ Skriver ut {copies} etikett(er)…")
-        worker = _LabelWorker(chosen, copies, values)
+        printer_name = self._label_printer_name
+        printer_label = printer_name or "Windows standardskrivare"
+        self._evt(
+            "label.print_started",
+            f"Skriver ut {copies} × {chosen.name} på {printer_label}",
+            label=chosen.name,
+            copies=copies,
+            printer=printer_label,
+        )
+        self._set_status(f"🏷️ Skriver ut {copies} etikett(er) på {printer_label}…")
+        worker = _LabelWorker(chosen, copies, values, printer_name)
         worker.signals.finished.connect(self._on_label_finished, Qt.ConnectionType.QueuedConnection)
         worker.signals.error.connect(
             lambda error: self._on_label_finished(_labels.LabelResult(False, chosen.name, copies, error=error)),
