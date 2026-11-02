@@ -305,6 +305,36 @@ class DetailedFormatter(logging.Formatter):
         return super().format(record)
 
 
+class ErrorSummaryFilter(logging.Filter):
+    """Keep errors plus explicitly tagged EventBus failure warnings."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= logging.ERROR or bool(
+            getattr(record, "_intygsdrive_error_event", False)
+        )
+
+
+def create_error_file_handler(
+    filename: Path | str,
+    session_id: str = SESSION_ID,
+) -> SmartRotatingHandler:
+    """Create a daily, error-only file handler for the app-wide error summary."""
+    path = Path(filename)
+    handler = SmartRotatingHandler(
+        str(path),
+        when="midnight",
+        backupCount=0,
+        encoding="utf-8",
+        compress=True,
+        archive_dir=path.parent / "archive",
+    )
+    handler.setLevel(logging.WARNING)
+    handler.addFilter(ErrorSummaryFilter())
+    handler.setFormatter(DetailedFormatter(session_id))
+    handler._intygsdrive_error_handler = True  # type: ignore[attr-defined]
+    return handler
+
+
 class ColorFormatter(logging.Formatter):
     """ANSI-färger för konsol (aktiveras endast i TTY)."""
 
@@ -470,6 +500,7 @@ __all__: list[str] = [
     "LogStorage",
     "SmartRotatingHandler",
     "DetailedFormatter",
+    "create_error_file_handler",
     "ColorFormatter",
     "archive_old_logs",
     "export_text",

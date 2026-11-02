@@ -968,6 +968,13 @@ class MainWindow(QMainWindow):
                 icon_name,
                 lambda _checked=False, path=folder: self._open_folder(path),
             )
+        tools_menu.addSeparator()
+        self._add_action(
+            tools_menu,
+            "Sök efter uppdateringar nu",
+            "SP_BrowserReload",
+            lambda: self._app._start_release_check(manual=True),
+        )
 
         help_menu = bar.addMenu("&Hjälp")
         self._add_action(
@@ -2121,12 +2128,14 @@ class Application:
         # Ingen fast malluppdateringstimer här. Certificates-pluginet startar
         # en enda bakgrundsskanning självt och sammanslår manuella refresh-event.
 
-    def _start_release_check(self) -> None:
+    def _start_release_check(self, manual: bool = False) -> None:
         """Kontrollera en publicerad GitHub Release utan att blockera UI."""
-        if not bool(self.config_value("app.check_updates", True)):
+        if not manual and not bool(self.config_value("app.check_updates", True)):
             _evt("update.check_skipped", "Automatisk releasekontroll är avstängd")
             return
         if self._update_thread is not None and self._update_thread.is_alive():
+            if manual and self.window is not None:
+                self.window.status_signal.emit("En uppdateringskontroll pågår redan.")
             return
 
         def check() -> None:
@@ -2143,34 +2152,47 @@ class Application:
                     "release": release,
                     "staged": staged,
                     "error": None,
+                    "manual": manual,
                 })
             except Exception as exc:
                 self._update_signals.completed.emit({
                     "release": None,
                     "error": f"{type(exc).__name__}: {exc}",
+                    "manual": manual,
                 })
 
         self._update_thread = threading.Thread(
             target=check, name="github-release-check", daemon=True
         )
         self._update_thread.start()
-        _evt("update.check_started", "Kontrollerar GitHub Releases i bakgrunden")
+        _evt(
+            "update.check_started",
+            "Manuell uppdateringskontroll startad" if manual else "Kontrollerar GitHub Releases i bakgrunden",
+            manual=manual,
+        )
 
     @Slot(object)
     def _on_release_check_completed(self, result: Any) -> None:
         if not isinstance(result, dict):
             return
+        manual = bool(result.get("manual", False))
         error = result.get("error")
         if error:
-            _evt("update.check_failed", "Automatisk GitHub-uppdatering misslyckades",
-                 level=logging.WARNING, error=str(error))
+            _evt("update.check_failed", "GitHub-uppdateringskontroll misslyckades",
+                 level=logging.WARNING, error=str(error), manual=manual)
             if self.window is not None and not self._exit_requested:
-                self.window.status_signal.emit("⚠ Automatisk uppdatering misslyckades; försöker igen senare.")
+                message = (
+                    f"⚠ Uppdateringssökningen misslyckades: {error}"
+                    if manual else "⚠ Automatisk uppdatering misslyckades; försöker igen senare."
+                )
+                self.window.status_signal.emit(message)
             return
         release = result.get("release")
         if release is None:
             _evt("update.current", "Ingen nyare GitHub Release hittades",
-                 level=logging.DEBUG, version=APP_VERSION)
+                 level=logging.DEBUG, version=APP_VERSION, manual=manual)
+            if manual and self.window is not None and not self._exit_requested:
+                self.window.status_signal.emit(f"✅ IntygsDrive {APP_VERSION} är aktuell.")
             return
 
         staged = result.get("staged")
@@ -2178,11 +2200,17 @@ class Application:
             return
         if not getattr(staged, "staged", False):
             _evt("update.current", "Nedladdade appfiler är redan aktuella",
-                 level=logging.DEBUG, version=release.version, commit=release.commit_sha)
+                 level=logging.DEBUG, version=release.version, commit=release.commit_sha,
+                 manual=manual)
+            if manual and self.window is not None and not self._exit_requested:
+                self.window.status_signal.emit(
+                    f"✅ Appfilerna är redan uppdaterade ({release.version}, "
+                    f"{release.commit_sha[:7]})."
+                )
             return
 
         _evt("update.staged", "Nyare appkod hämtad och väntar på att appen stängs",
-             version=release.version, commit=release.commit_sha)
+             version=release.version, commit=release.commit_sha, manual=manual)
         if self.window is not None and not self._exit_requested:
             self.window.status_signal.emit(
                 f"⬇ Ny appkod ({release.version}, commit {release.commit_sha[:7]}) hämtad — "

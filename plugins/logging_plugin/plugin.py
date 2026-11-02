@@ -60,6 +60,7 @@ from .core import (
     SESSION_ID as CORE_SESSION_ID,
     ColorFormatter,
     DetailedFormatter,
+    create_error_file_handler,
     LogEntry,
     LogStorage,
     QuickFilter,
@@ -166,6 +167,8 @@ class Plugin:
         self._event_bus: Any | None = None
         self._unsubscribers: list[Callable[[], None]] = []
         self._root_logger: logging.Logger | None = None
+        self._python_root_logger: logging.Logger | None = None
+        self._error_handler: logging.Handler | None = None
         self._interceptor: _InterceptorHandler | None = None
         self._previous_exception_hook: Any | None = None
         self._previous_thread_exception_hook: Any | None = None
@@ -184,6 +187,7 @@ class Plugin:
         self.current_log_file: Path | None = None
         self.json_log_file: Path | None = None
         self.crash_log_file: Path | None = None
+        self.error_log_file: Path | None = None
 
         self._storage = LogStorage(max_memory_entries=self.MAX_MEMORY_ENTRIES)
         self._queue: "queue.Queue[LogEntry]" = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
@@ -259,6 +263,7 @@ class Plugin:
                 "session_id": self.session_id,
                 "timestamp": self.session_start.isoformat(timespec="seconds"),
                 "log_file": str(self.current_log_file or ""),
+                "errors_file": str(self.error_log_file or ""),
                 "version": self.version,
             },
         )
@@ -353,11 +358,21 @@ class Plugin:
         self.current_log_file = self.log_dir / "app.log"
         self.json_log_file = self.log_dir / f"session_{datetime.now():%Y-%m-%d}.jsonl"
         self.crash_log_file = self.log_dir / "crash.log"
+        self.error_log_file = self.log_dir / "errors.log"
 
     def _setup_logging(self) -> None:
         logger = logging.getLogger("Intygsgenerator")
         logger.setLevel(logging.DEBUG)
+        # The app logger is isolated from global console logging; attach the
+        # summary handler to both it and Python root to catch both namespaces.
         logger.propagate = False
+        python_root = logging.getLogger()
+        self._python_root_logger = python_root
+        for existing in list(python_root.handlers):
+            if getattr(existing, "_intygsdrive_error_handler", False):
+                python_root.removeHandler(existing)
+                with contextlib.suppress(Exception):
+                    existing.close()
         for handler in list(logger.handlers):
             with contextlib.suppress(Exception):
                 handler.close()
@@ -382,6 +397,16 @@ class Plugin:
         self._interceptor.setLevel(logging.DEBUG)
         logger.addHandler(self._interceptor)
         self._root_logger = logger
+        if self.error_log_file is not None:
+            try:
+                self._error_handler = create_error_file_handler(
+                    self.error_log_file, self.session_id
+                )
+                logger.addHandler(self._error_handler)
+                python_root.addHandler(self._error_handler)
+            except Exception:
+                self._error_handler = None
+                logger.exception("[LOGGING] Kunde inte aktivera errors.log")
 
     def _setup_tracer(self) -> None:
         self._tracer = FileSystemTracer(self._on_file_operation)
@@ -596,8 +621,10 @@ class Plugin:
                     value = str(data[key])
                     parts.append(f"{key}={value[:60]!r}")
         message = f"[EVENT] {event_name}" + (f"\n  ↳ {', '.join(parts)}" if parts else "")
-        if any(token in event_name for token in ("error", "failed", "crash")):
-            self._safe_log("warning", message)
+        if any(token in event_name.casefold() for token in ("error", "failed", "crash")):
+            self._safe_log(
+                "warning", message, extra={"_intygsdrive_error_event": True}
+            )
             self._emit("logging.error_logged", {"event": event_name, "timestamp": datetime.now().isoformat(timespec="seconds")})
         elif any(token in event_name for token in ("generated", "completed", "started", "imported")):
             self._safe_log("info", message)
@@ -874,6 +901,7 @@ class Plugin:
             f"- Python: {sys.version.split()[0]} · Plattform: {sys.platform}",
             f"- Loggkatalog: `{self.log_dir}` · arkiv: {stats['archived_files']} fil(er)",
             f"- Aktiv logg: `{stats['log_file']}`",
+            f"- Samlad fellogg: `{stats['errors_file']}`",
             "",
             "## Statistik",
             f"- Events: {stats['total_events']} ({stats['events_per_minute']}/min) · lagrade: {stats['storage_count']}",
@@ -960,6 +988,7 @@ class Plugin:
             "duration_str": storage_stats.get_duration_str(),
             "storage_count": self._storage.count,
             "log_file": str(self.current_log_file or ""),
+            "errors_file": str(self.error_log_file or ""),
             "log_dir": str(self.log_dir or ""),
             "archive_dir": str(self.archive_dir or ""),
             "archived_files": archived_files,
@@ -973,12 +1002,14 @@ class Plugin:
         text = message % args if args else message
         self._safe_log(level.casefold(), text)
 
-    def _safe_log(self, level: str, message: str) -> None:
+    def _safe_log(
+        self, level: str, message: str, *, extra: dict[str, Any] | None = None
+    ) -> None:
         logger = self._root_logger
         if logger is not None:
             method = getattr(logger, level, logger.info)
             try:
-                method(message)
+                method(message, extra=extra) if extra else method(message)
                 return
             except Exception:
                 _logger.debug("[LOGGING] Rootloggning misslyckades", exc_info=True)
@@ -988,10 +1019,19 @@ class Plugin:
             return
 
     def _close_handlers(self) -> None:
-        if self._root_logger is None:
-            return
-        for handler in list(self._root_logger.handlers):
+        if self._error_handler is not None:
+            if self._python_root_logger is not None:
+                self._python_root_logger.removeHandler(self._error_handler)
+            if self._root_logger is not None:
+                self._root_logger.removeHandler(self._error_handler)
             with contextlib.suppress(Exception):
-                handler.flush()
-                handler.close()
-            self._root_logger.removeHandler(handler)
+                self._error_handler.flush()
+                self._error_handler.close()
+            self._error_handler = None
+        if self._root_logger is not None:
+            for handler in list(self._root_logger.handlers):
+                with contextlib.suppress(Exception):
+                    handler.flush()
+                    handler.close()
+                self._root_logger.removeHandler(handler)
+        self._python_root_logger = None

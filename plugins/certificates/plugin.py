@@ -490,6 +490,7 @@ class Plugin:
         self._total_label: QLabel | None = None
         self._info_label: QLabel | None = None
         self._counter_label: QLabel | None = None
+        self._fields_title: QLabel | None = None
         self._fields_area: FieldsScrollArea | None = None
         self._field_widgets: list[FieldWidget] = []
         self._last_values: dict[str, str] = {}
@@ -1096,8 +1097,8 @@ class Plugin:
         root.setObjectName("CertificatesTab")
         root.csv_dropped.connect(self._handle_batch_drop)
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(self._sp(10), self._sp(10), self._sp(10), self._sp(10))
-        outer.setSpacing(self._sp(8))
+        outer.setContentsMargins(self._sp(6), self._sp(6), self._sp(6), self._sp(6))
+        outer.setSpacing(self._sp(4))
         outer.addWidget(self._build_status_row())
         outer.addWidget(self._build_template_selector())
         outer.addWidget(self._build_label_mapping_row())
@@ -1111,8 +1112,8 @@ class Plugin:
     def _build_status_row(self) -> QWidget:
         frame = QFrame()
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(self._sp(6), self._sp(3), self._sp(6), self._sp(3))
-        layout.setSpacing(self._sp(8))
+        layout.setContentsMargins(self._sp(4), self._sp(1), self._sp(4), self._sp(1))
+        layout.setSpacing(self._sp(5))
         self._status_label = QLabel("⏳ Initierar mallar…", frame)
         self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label, stretch=1)
@@ -1127,13 +1128,13 @@ class Plugin:
         frame = QFrame()
         frame.setFrameShape(QFrame.Shape.StyledPanel)
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(self._sp(10), self._sp(8), self._sp(10), self._sp(8))
-        layout.setSpacing(self._sp(7))
+        layout.setContentsMargins(self._sp(4), self._sp(1), self._sp(4), self._sp(1))
+        layout.setSpacing(self._sp(4))
         layout.addWidget(QLabel("📁 Mall:", frame))
 
         self._template_combo = QComboBox(frame)
         self._template_combo.setMinimumWidth(self._sp(280))
-        self._template_combo.setMinimumHeight(self._sp(34))
+        self._template_combo.setMinimumHeight(self._sp(24))
         self._template_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._template_combo.addItem("Skannar mallar…")
         self._template_combo.setEnabled(False)
@@ -1141,13 +1142,13 @@ class Plugin:
         layout.addWidget(self._template_combo, stretch=1)
 
         refresh = QPushButton("🔄", frame)
-        refresh.setFixedSize(self._sp(34), self._sp(34))
+        refresh.setFixedSize(self._sp(24), self._sp(24))
         refresh.setToolTip("Skanna mallar igen (F5)")
         refresh.clicked.connect(self.refresh_templates)
         layout.addWidget(refresh)
 
         open_templates = QPushButton("📂", frame)
-        open_templates.setFixedSize(self._sp(34), self._sp(34))
+        open_templates.setFixedSize(self._sp(24), self._sp(24))
         open_templates.setToolTip("Öppna mallmappen")
         open_templates.clicked.connect(self._open_templates_folder)
         layout.addWidget(open_templates)
@@ -1157,11 +1158,11 @@ class Plugin:
         frame = QFrame()
         frame.setFrameShape(QFrame.Shape.StyledPanel)
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(self._sp(10), self._sp(5), self._sp(10), self._sp(5))
-        layout.setSpacing(self._sp(7))
+        layout.setContentsMargins(self._sp(4), self._sp(1), self._sp(4), self._sp(1))
+        layout.setSpacing(self._sp(4))
         layout.addWidget(QLabel("🏷️ Etikett för intygsmall:", frame))
         self._label_mapping_combo = QComboBox(frame)
-        self._label_mapping_combo.setMinimumHeight(self._sp(32))
+        self._label_mapping_combo.setMinimumHeight(self._sp(23))
         self._label_mapping_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._label_mapping_combo.currentIndexChanged.connect(self._on_label_mapping_changed)
         layout.addWidget(self._label_mapping_combo, stretch=1)
@@ -1396,7 +1397,7 @@ class Plugin:
         frame = QFrame()
         frame.setFrameShape(QFrame.Shape.StyledPanel)
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(self._sp(10), self._sp(6), self._sp(10), self._sp(6))
+        layout.setContentsMargins(self._sp(4), self._sp(1), self._sp(4), self._sp(1))
         self._info_label = QLabel("Välj en mall för att se dess information.", frame)
         self._info_label.setWordWrap(True)
         layout.addWidget(self._info_label, stretch=1)
@@ -1410,14 +1411,16 @@ class Plugin:
         frame = QFrame()
         frame.setFrameShape(QFrame.Shape.StyledPanel)
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(self._sp(6), self._sp(6), self._sp(6), self._sp(6))
-        layout.setSpacing(self._sp(4))
+        layout.setContentsMargins(self._sp(4), self._sp(3), self._sp(4), self._sp(3))
+        layout.setSpacing(self._sp(2))
         title = QLabel("✏️ Uppgifter", frame)
         title_font = title.font()
         title_font.setBold(True)
         title.setFont(title_font)
+        self._fields_title = title
         layout.addWidget(title)
         self._fields_area = FieldsScrollArea(frame)
+        self._fields_area.layout_changed.connect(self._fit_fields_area)
         layout.addWidget(self._fields_area)
         return frame
 
@@ -1425,45 +1428,45 @@ class Plugin:
         """Keep every action reachable on narrow and high-DPI windows."""
         frame = QFrame()
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(0, self._sp(4), 0, 0)
-        layout.setSpacing(self._sp(4))
+        layout.setContentsMargins(0, self._sp(2), 0, 0)
+        layout.setSpacing(self._sp(2))
 
         buttons = QGridLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
-        buttons.setHorizontalSpacing(self._sp(6))
-        buttons.setVerticalSpacing(self._sp(4))
+        buttons.setHorizontalSpacing(self._sp(4))
+        buttons.setVerticalSpacing(self._sp(0))
 
         self._generate_button = QPushButton("🚀 Generera PDF", frame)
-        self._generate_button.setMinimumHeight(self._sp(36))
+        self._generate_button.setMinimumHeight(self._sp(25))
         self._generate_button.setToolTip("Generera intyg (Ctrl+G)")
         self._generate_button.clicked.connect(self._on_generate)
         buttons.addWidget(self._generate_button, 0, 0)
 
         self._batch_button = QPushButton("📦 Batch", frame)
-        self._batch_button.setMinimumHeight(self._sp(36))
+        self._batch_button.setMinimumHeight(self._sp(25))
         self._batch_button.setToolTip("Batch-generering från CSV")
         self._batch_button.clicked.connect(self._on_batch_generate)
         buttons.addWidget(self._batch_button, 0, 1)
 
         output = QPushButton("📂 Output", frame)
-        output.setMinimumHeight(self._sp(36))
+        output.setMinimumHeight(self._sp(25))
         output.setToolTip("Öppna outputmapp (Ctrl+O)")
         output.clicked.connect(self._open_output_folder)
         buttons.addWidget(output, 0, 2)
 
         clear = QPushButton("🗑️ Rensa", frame)
-        clear.setMinimumHeight(self._sp(36))
+        clear.setMinimumHeight(self._sp(25))
         clear.setToolTip("Rensa fält (Ctrl+L)")
         clear.clicked.connect(self._clear_fields)
-        buttons.addWidget(clear, 1, 0)
+        buttons.addWidget(clear, 0, 3)
 
         imported = QPushButton("📥 Import", frame)
-        imported.setMinimumHeight(self._sp(36))
+        imported.setMinimumHeight(self._sp(25))
         imported.setToolTip("Importera befintliga PDF-intyg (Ctrl+I)")
         imported.clicked.connect(self._import_certificates)
-        buttons.addWidget(imported, 1, 1)
+        buttons.addWidget(imported, 0, 4)
 
-        for column in range(3):
+        for column in range(5):
             buttons.setColumnStretch(column, 1)
         for button in (self._generate_button, self._batch_button, output, clear, imported):
             button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -1649,26 +1652,22 @@ class Plugin:
         placeholders = [str(value) for value in _safe_get(template, "placeholders", []) or []]
         self._current_placeholders = list(dict.fromkeys(placeholders))
         fields = _template_user_fields(template)
+        automatic_count = sum(1 for field_name in placeholders if _is_auto_field(field_name))
+        if self._fields_title is not None:
+            title = f"✏️ Uppgifter · {len(fields)} fält"
+            if automatic_count:
+                title += f" · {automatic_count} automatiska"
+            self._fields_title.setText(title)
 
         if not fields:
             label = QLabel("✅ Inga manuella fält. Alla placeholders fylls automatiskt.", area.content)
             label.setWordWrap(True)
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            area.content_layout.addWidget(label)
-            area.add_stretch()
+            area.set_content(notices=[label])
             self._evt("cert.fields_built", "Inga manuella fält — allt automatiskt",
                       level=logging.DEBUG, placeholders=len(placeholders))
             self._fit_fields_area()
             return
-
-        automatic_count = sum(1 for field_name in placeholders if _is_auto_field(field_name))
-        if automatic_count:
-            notice = QLabel(
-                f"ℹ️ {automatic_count} fält fylls i automatiskt (nummer, datum och tid).",
-                area.content,
-            )
-            notice.setWordWrap(True)
-            area.content_layout.addWidget(notice)
 
         for field_name in fields:
             upper = field_name.upper()
@@ -1688,13 +1687,12 @@ class Plugin:
                 validator=validator,
                 field_kind=kind,
                 tooltip=tooltip,
+                compact=True,
                 parent=area.content,
             )
             field.value_changed.connect(self._on_field_value_changed)
-            area.content_layout.addWidget(field)
             self._field_widgets.append(field)
-        area.add_stretch()
-        area.scroll_to_top()
+        area.set_content(fields=list(self._field_widgets))
         self._evt("cert.fields_built", f"{len(self._field_widgets)} fält byggda",
                   level=logging.DEBUG, fields=len(self._field_widgets),
                   auto=automatic_count, placeholders=len(placeholders))
@@ -1705,8 +1703,8 @@ class Plugin:
     def _fit_fields_area(self) -> None:
         """10.2.0: gör fältytan så hög att ALLA fält ryms utan scroll.
 
-        Fälten ligger i en QScrollArea; genom att sätta minimihöjden till
-        innehållets höjd (tak: 55 % av fönstret) ryms samtliga fält direkt.
+        Fälten ligger i en QScrollArea. Den kompakta grid-layoutens höjd styr
+        minsta yta, begränsad till 62 % av flikens höjd; små fönster kan scrolla.
         Först vid mycket många fält på liten skärm behövs fortfarande scroll.
         """
         area = self._fields_area
@@ -1719,14 +1717,19 @@ class Plugin:
         if content_h <= 0:
             return
         try:
-            cap = max(220, int(self.height() * 0.55))
+            host_height = int(self._tab_widget.height()) if self._tab_widget is not None else 0
         except Exception:
-            cap = 520
+            host_height = 0
+        if host_height <= 0:
+            host_height = max(int(area.height()), 360)
+        cap = max(120, int(host_height * 0.62))
         with suppress(Exception):
-            area.setMinimumHeight(int(min(content_h + 12, cap)))
+            area.setMinimumHeight(int(min(content_h + 8, cap)))
             area.updateGeometry()
 
     def _clear_template_view(self) -> None:
+        if self._fields_title is not None:
+            self._fields_title.setText("✏️ Uppgifter")
         if self._info_label is not None:
             self._info_label.setText("Ingen giltig mall är vald.")
         if self._counter_label is not None:

@@ -28,13 +28,12 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QProgressBar,
     QScrollArea,
-    QSizePolicy,
-    QSpacerItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -94,6 +93,8 @@ def _validation_state(result: Any) -> tuple[bool, bool, str, str]:
 class FieldsScrollArea(QScrollArea):
     """Responsiv och mus-hjulsvänlig yta för dynamiska inmatningsfält."""
 
+    layout_changed = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWidgetResizable(True)
@@ -101,9 +102,13 @@ class FieldsScrollArea(QScrollArea):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._content = QWidget(self)
-        self._layout = QVBoxLayout(self._content)
-        self._layout.setContentsMargins(_sp(4), _sp(4), _sp(4), _sp(4))
-        self._layout.setSpacing(_sp(6))
+        self._layout = QGridLayout(self._content)
+        self._layout.setContentsMargins(_sp(4), _sp(3), _sp(4), _sp(3))
+        self._layout.setHorizontalSpacing(_sp(10))
+        self._layout.setVerticalSpacing(_sp(1))
+        self._notices: list[QWidget] = []
+        self._fields: list[QWidget] = []
+        self._columns = 1
         self._content.installEventFilter(self)
         self.setWidget(self._content)
 
@@ -112,7 +117,7 @@ class FieldsScrollArea(QScrollArea):
         return self._content
 
     @property
-    def content_layout(self) -> QVBoxLayout:
+    def content_layout(self) -> QGridLayout:
         return self._layout
 
     def clear_widgets(self) -> None:
@@ -122,19 +127,61 @@ class FieldsScrollArea(QScrollArea):
             widget = item.widget() if item is not None else None
             if widget is not None:
                 widget.deleteLater()
+        self._notices.clear()
+        self._fields.clear()
+        self._columns = 0
+
+    def set_content(
+        self,
+        *,
+        notices: list[QWidget] | None = None,
+        fields: list[QWidget] | None = None,
+    ) -> None:
+        """Lay out all form fields in responsive columns, with scroll as fallback."""
+        self._notices = list(notices or [])
+        self._fields = list(fields or [])
+        self._columns = 0
+        self._reflow_fields()
+        self.updateGeometry()
+        self.scroll_to_top()
+
+    def _column_count(self) -> int:
+        width = max(self.viewport().width(), self.width())
+        if width >= _sp(1120):
+            return 3
+        if width >= _sp(620):
+            return 2
+        return 1
+
+    def _reflow_fields(self) -> None:
+        columns = self._column_count()
+        if columns == self._columns and self._layout.count():
+            return
+        self._columns = columns
+        while self._layout.count():
+            self._layout.takeAt(0)
+        for column in range(3):
+            self._layout.setColumnStretch(column, 1 if column < columns else 0)
+
+        row = 0
+        for notice in self._notices:
+            self._layout.addWidget(notice, row, 0, 1, columns)
+            row += 1
+        for index, field in enumerate(self._fields):
+            self._layout.addWidget(field, row + index // columns, index % columns)
 
     def add_stretch(self) -> None:
-        self._layout.addSpacerItem(
-            QSpacerItem(
-                0,
-                0,
-                QSizePolicy.Policy.Minimum,
-                QSizePolicy.Policy.Expanding,
-            )
-        )
+        """Compatibility helper; grid rows already use only the needed height."""
+        return
 
     def scroll_to_top(self) -> None:
         self.verticalScrollBar().setValue(self.verticalScrollBar().minimum())
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "_layout") and hasattr(self, "_fields"):
+            self._reflow_fields()
+            self.layout_changed.emit()
 
     def eventFilter(self, watched: Any, event: QEvent) -> bool:
         """Säkerställ att mushjulet alltid fortsätter att scrolla formuläret."""
@@ -230,6 +277,7 @@ class FieldWidget(QWidget):
         validator: ValidationCallable | None = None,
         field_kind: str = "",
         tooltip: str = "",
+        compact: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -239,20 +287,21 @@ class FieldWidget(QWidget):
         self._base_tooltip = tooltip
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, _sp(2), 0, _sp(2))
-        layout.setSpacing(_sp(8))
+        layout.setContentsMargins(0, 0 if compact else _sp(2), 0, 0 if compact else _sp(2))
+        layout.setSpacing(_sp(4 if compact else 8))
 
         prefix = "🚗 " if self._field_kind == "vin" else "🔢 " if self._field_kind == "reg" else ""
         label = QLabel(f"{prefix}{display_name}:", self)
-        # 10.3.0: adaptiva etikettmått — text klippas aldrig (§30).
-        label.setMinimumWidth(_sp(150))
-        label.setMaximumWidth(_sp(230))
+        # Kompakt formulärläge får plats i flera kolumner utan att röra fältvärden.
+        label.setMinimumWidth(_sp(88 if compact else 150))
+        label.setMaximumWidth(_sp(165 if compact else 230))
         label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        label.setToolTip(display_name)
         layout.addWidget(label)
 
         self._entry = QLineEdit(self)
         self._entry.setText(default_value)
-        self._entry.setMinimumHeight(_sp(32))
+        self._entry.setMinimumHeight(_sp(22 if compact else 32))
         self._entry.setAccessibleName(display_name)
         self._entry.setToolTip(tooltip)
         self._entry.textChanged.connect(self._on_text_changed)
@@ -260,7 +309,7 @@ class FieldWidget(QWidget):
         layout.addWidget(self._entry, stretch=1)
 
         self._status_label = QLabel(self)
-        self._status_label.setFixedWidth(_sp(30))
+        self._status_label.setFixedWidth(_sp(18 if compact else 30))
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._status_label)
 
