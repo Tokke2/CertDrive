@@ -1,8 +1,11 @@
+import csv
 import importlib.util
+import json
 import logging
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -53,6 +56,65 @@ class ErrorSummaryLogTests(unittest.TestCase):
             self.assertIn("RuntimeError: converter traceback marker", contents)
             self.assertIn("other.plugin.worker", contents)
             self.assertNotIn("warning is not an error", contents)
+
+    def test_exception_details_extracts_type_and_full_traceback(self):
+        try:
+            raise ValueError("traceback detail marker")
+        except ValueError:
+            record = logging.LogRecord(
+                "test.errors", logging.ERROR, __file__, 10, "failed", (), sys.exc_info()
+            )
+        exception_type, exception = LOGGING_CORE.exception_details(record)
+        self.assertEqual(exception_type, "ValueError")
+        self.assertIn("ValueError: traceback detail marker", exception)
+
+    def test_exception_traceback_is_capped_for_queue_safety(self):
+        record = logging.LogRecord(
+            "test.errors", logging.ERROR, __file__, 10, "failed", (), None
+        )
+        record.exc_text = "x" * 40_000
+        _exception_type, exception = LOGGING_CORE.exception_details(record)
+        self.assertLess(len(exception), 32_100)
+        self.assertIn("traceback truncated", exception)
+
+    def test_exception_is_preserved_in_structured_and_text_exports(self):
+        entry = LOGGING_CORE.LogEntry(
+            timestamp=datetime(2026, 11, 3, 12, 0, 0),
+            level="ERROR",
+            category="Updater",
+            message="Update failed",
+            exception_type="ValueError",
+            exception="ValueError: traceback detail marker\n  at updater.py:42",
+            module_name="updater",
+            filename="updater.py",
+            process_id=123,
+        )
+        data = entry.to_dict()
+        self.assertEqual(data["exception_type"], "ValueError")
+        self.assertIn("traceback detail marker", data["exception"])
+        self.assertEqual(data["module"], "updater")
+        self.assertEqual(data["process"], 123)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            text_path = root / "logs.txt"
+            json_path = root / "logs.json"
+            csv_path = root / "logs.csv"
+            html_path = root / "logs.html"
+            markdown_path = root / "logs.md"
+            LOGGING_CORE.export_text(text_path, [entry], "test", None)
+            LOGGING_CORE.export_json(json_path, [entry], "test", None)
+            LOGGING_CORE.export_csv(csv_path, [entry])
+            LOGGING_CORE.export_html(html_path, [entry], "test", None)
+            LOGGING_CORE.export_markdown(markdown_path, [entry], "test", None)
+            self.assertIn("traceback detail marker", text_path.read_text(encoding="utf-8"))
+            self.assertIn("traceback detail marker", json_path.read_text(encoding="utf-8"))
+            self.assertIn("traceback detail marker", csv_path.read_text(encoding="utf-8"))
+            self.assertIn("traceback detail marker", html_path.read_text(encoding="utf-8"))
+            self.assertIn("traceback detail marker", markdown_path.read_text(encoding="utf-8"))
+            with csv_path.open(encoding="utf-8", newline="") as stream:
+                rows = list(csv.reader(stream))
+            self.assertEqual(rows[0][-2:], ["exception_type", "exception"])
+            self.assertEqual(rows[1][-2], "ValueError")
 
 
 if __name__ == "__main__":

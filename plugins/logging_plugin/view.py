@@ -341,13 +341,19 @@ class LoggerView(QWidget):
         mark = "🔖 " if getattr(entry, "id", 0) in self._bookmarks else ""
         line = f"{mark}{stamp_s} | {level:<8} | {category} | {message}"
         if self._detailed:
+            source = getattr(entry, "filename", "") or getattr(entry, "module_name", "")
             line += (
                 f"  [{getattr(entry, 'thread_name', '')} "
-                f"{getattr(entry, 'func_name', '')}:{getattr(entry, 'line_no', '')}]"
+                f"pid={getattr(entry, 'process_id', 0)} "
+                f"{source}:{getattr(entry, 'func_name', '')}:{getattr(entry, 'line_no', '')}]"
             )
             event = getattr(entry, "event", None)
             if event:
                 line += f" {{{event}}}"
+            exception = getattr(entry, "exception", None)
+            if exception:
+                exception_type = getattr(entry, "exception_type", None) or "Exception"
+                line += f"\n    {exception_type}:\n{exception}"
         return line
 
     def set_entries(self, entries: list[Any]) -> None:

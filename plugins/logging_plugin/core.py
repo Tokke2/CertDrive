@@ -80,6 +80,25 @@ class QuickFilter:
 # ─── LogEntry ────────────────────────────────────────────────────────────────
 
 
+def exception_details(record: logging.LogRecord) -> tuple[str | None, str | None]:
+    """Extract exception type and traceback, bounded to protect the log queue."""
+    if record.exc_info:
+        try:
+            exception_type = getattr(record.exc_info[0], "__name__", None)
+            trace = logging.Formatter().formatException(record.exc_info)
+            if len(trace) > 32_000:
+                trace = trace[:32_000] + "\\n...[traceback truncated at 32,000 characters]"
+            return exception_type, trace
+        except Exception:
+            return getattr(record.exc_info[0], "__name__", None), "Traceback formatting failed"
+    if record.exc_text:
+        trace = str(record.exc_text)
+        if len(trace) > 32_000:
+            trace = trace[:32_000] + "\\n...[traceback truncated at 32,000 characters]"
+        return None, trace
+    return None, None
+
+
 @dataclass(slots=True)
 class LogEntry:
     """En loggpost. 9.0.0: valfria event/ctx för AI-kontraktet."""
@@ -96,6 +115,11 @@ class LogEntry:
     event: str | None = None
     ctx: dict[str, Any] | None = None
     bookmarked: bool = False
+    exception_type: str | None = None
+    exception: str | None = None
+    module_name: str = ""
+    filename: str = ""
+    process_id: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         data = {
@@ -113,6 +137,16 @@ class LogEntry:
             data["event"] = self.event
         if self.ctx:
             data["ctx"] = self.ctx
+        if self.exception_type:
+            data["exception_type"] = self.exception_type
+        if self.exception:
+            data["exception"] = self.exception
+        if self.module_name:
+            data["module"] = self.module_name
+        if self.filename:
+            data["filename"] = self.filename
+        if self.process_id:
+            data["process"] = self.process_id
         return data
 
 
@@ -295,7 +329,8 @@ class DetailedFormatter(logging.Formatter):
     def __init__(self, session_id: str = SESSION_ID) -> None:
         super().__init__(
             "%(asctime)s | %(levelname)-8s | [%(session)s] | "
-            "%(threadName)-15s | %(name)s | %(funcName)s:%(lineno)d | %(message)s",
+            "%(threadName)-15s | pid=%(process)d | %(name)s | "
+            "%(pathname)s:%(funcName)s:%(lineno)d | %(message)s",
             "%Y-%m-%d %H:%M:%S",
         )
         self.session_id = session_id
@@ -424,10 +459,16 @@ def export_text(path: Path | str, entries: list[LogEntry], session_id: str, stat
         "=" * 72,
     ]
     for entry in entries:
+        source = entry.filename or entry.module_name
+        location = f"{source}:{entry.func_name}:{entry.line_no}" if source else ""
         lines.append(
             f"{entry.timestamp:%Y-%m-%d %H:%M:%S} | {entry.level:<8} | "
-            f"{entry.category} | {entry.message}"
+            f"{entry.category} | {entry.thread_name} pid={entry.process_id} | "
+            f"{location} | {entry.message}"
         )
+        if entry.exception:
+            exception_type = entry.exception_type or "Exception"
+            lines.extend((f"  {exception_type} traceback:", entry.exception))
     _atomic_write(Path(path), "\n".join(lines) + "\n")
     return True
 
@@ -446,11 +487,17 @@ def export_json(path: Path | str, entries: list[LogEntry], session_id: str, stat
 def export_csv(path: Path | str, entries: list[LogEntry]) -> bool:
     with open(path, "w", encoding="utf-8", newline="") as handle:
         writer = _csv.writer(handle)
-        writer.writerow(["timestamp", "level", "category", "message", "thread", "event"])
+        writer.writerow([
+            "timestamp", "level", "category", "message", "thread", "process",
+            "module", "filename", "function", "line", "event",
+            "exception_type", "exception",
+        ])
         for entry in entries:
             writer.writerow([
                 entry.timestamp.isoformat(), entry.level, entry.category,
-                entry.message, entry.thread_name, entry.event or "",
+                entry.message, entry.thread_name, entry.process_id,
+                entry.module_name, entry.filename, entry.func_name, entry.line_no,
+                entry.event or "", entry.exception_type or "", entry.exception or "",
             ])
     return True
 
@@ -461,17 +508,30 @@ def export_html(path: Path | str, entries: list[LogEntry], session_id: str, stat
     rows = []
     for entry in entries:
         color = colors.get(str(entry.level).upper(), "#1a1a1a")
+        exception_html = ""
+        if entry.exception:
+            exception_type = _html.escape(entry.exception_type or "Exception")
+            exception_html = (
+                f"<details><summary>{exception_type} traceback</summary>"
+                f"<pre>{_html.escape(entry.exception)}</pre></details>"
+            )
+        source = _html.escape(entry.filename or entry.module_name)
+        location = _html.escape(f"{source}:{entry.func_name}:{entry.line_no}")
         rows.append(
             f"<tr><td>{entry.timestamp:%H:%M:%S}</td>"
             f"<td style='color:{color}'>{_html.escape(entry.level)}</td>"
             f"<td>{_html.escape(entry.category)}</td>"
-            f"<td>{_html.escape(entry.message)}</td></tr>"
+            f"<td>{_html.escape(entry.thread_name)} / pid {entry.process_id}</td>"
+            f"<td>{location}</td>"
+            f"<td>{_html.escape(entry.message)}{exception_html}</td></tr>"
         )
     content = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<title>Loggexport</title></head><body>"
         f"<h1>Loggexport {session_id}</h1><table border='1' cellpadding='4'>"
-        + "".join(rows) + "</table></body></html>"
+        "<thead><tr><th>Tid</th><th>Nivå</th><th>Kategori</th><th>Tråd/process</th>"
+        "<th>Källa</th><th>Meddelande och undantag</th></tr></thead><tbody>"
+        + "".join(rows) + "</tbody></table></body></html>"
     )
     _atomic_write(Path(path), content)
     return True
@@ -486,7 +546,18 @@ def export_markdown(path: Path | str, entries: list[LogEntry], session_id: str, 
     ]
     for entry in entries:
         event = f" `{entry.event}`" if entry.event else ""
-        lines.append(f"- `{entry.timestamp:%H:%M:%S}` **{entry.level}** {entry.category}{event}: {entry.message}")
+        source = entry.filename or entry.module_name
+        location = f" `{source}:{entry.func_name}:{entry.line_no}`" if source else ""
+        process = f" `{entry.thread_name}` pid={entry.process_id}"
+        lines.append(
+            f"- `{entry.timestamp:%H:%M:%S}` **{entry.level}** "
+            f"{entry.category}{event}{process}{location}: {entry.message}"
+        )
+        if entry.exception:
+            exception_type = entry.exception_type or "Exception"
+            lines.extend(("", f"  `{exception_type}` traceback:", "  ```text"))
+            lines.extend(f"  {line}" for line in entry.exception.splitlines())
+            lines.append("  ```")
     _atomic_write(Path(path), "\n".join(lines) + "\n")
     return True
 

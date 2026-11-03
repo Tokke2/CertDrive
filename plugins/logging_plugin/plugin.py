@@ -61,6 +61,7 @@ from .core import (
     ColorFormatter,
     DetailedFormatter,
     create_error_file_handler,
+    exception_details,
     LogEntry,
     LogStorage,
     QuickFilter,
@@ -124,6 +125,7 @@ class _InterceptorHandler(logging.Handler):
         try:
             # 9.0.0: event/ctx följer med (AI-kontraktet) så att strukturerad
             # loggning från hela appen blir analyserbar i JSONL/export/vy.
+            exception_type, exception = exception_details(record)
             entry = LogEntry(
                 id=0,
                 timestamp=datetime.fromtimestamp(record.created),
@@ -136,6 +138,11 @@ class _InterceptorHandler(logging.Handler):
                 line_no=record.lineno,
                 event=getattr(record, "event", None),
                 ctx=getattr(record, "ctx", None),
+                exception_type=exception_type,
+                exception=exception,
+                module_name=record.module or "",
+                filename=record.filename or "",
+                process_id=record.process or 0,
             )
             self._destination.put_nowait(entry)
         except queue.Full:
