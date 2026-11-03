@@ -10,9 +10,10 @@ via Brother b-PAC SDK (COM-objektet "bpac.Document") och P-touch-mallar
 (.lbx) som användaren lägger i mappen Etiketter/ bredvid Mallar/.
 
 - Etikettmallar: alla *.lbx direkt i Etiketter/ (Word/P-touch-tempfiler ignoreras).
-- Fältfyllning: finns ett objekt i .lbx-mallen vars namn matchar ett intygsfält
-  (t.ex. "REG", "VIN", "NAMN") fylls det med intygets värde; övrigt skrivs
-  ut exakt som mallen ser ut.
+- Fältfyllning: objekt i .lbx-mallen vars namn matchar ett intygsfält
+  (t.ex. "REG", "VIN", "NAMN") fylls med intygets värde.
+- Kalibrering skriver ett numrerat mönster i mallens redigerbara textfält, utan
+  kunddata, certifikatgenerering eller sparande av ändringar i .lbx-filen.
 - b-PAC saknas → tydligt fel + nedladdningslänk (stående order 6).
 - Allt loggas via event-API:t (label.*). Inga tysta undantag.
 
@@ -97,15 +98,22 @@ def bpac_available() -> bool:
         return False
 
 
+def calibration_text(index: int) -> str:
+    """Return a fixed ruler-like marker that contains no customer data."""
+    return f"{max(1, int(index) + 1):02d}|0123456789|"
+
+
 def print_label(
     label_path: Path,
     copies: int = 1,
     values: dict[str, str] | None = None,
     printer_name: str = "",
+    *,
+    calibration: bool = False,
 ) -> LabelResult:
-    """Skriv ut en .lbx-etikett via b-PAC. Körs i bakgrundstråd (COM initieras här)."""
+    """Print an LBX label through b-PAC in a worker thread (COM is initialized here)."""
     started = time.perf_counter()
-    copies = max(1, min(99, int(copies)))
+    copies = 1 if calibration else max(1, min(99, int(copies)))
     name = label_path.name
     if sys.platform != "win32":
         return LabelResult(False, name, copies, error="Etikettutskrift via b-PAC kräver Windows")
@@ -133,11 +141,25 @@ def print_label(
             raise RuntimeError(f"b-PAC kunde inte öppna {name} (felkod {document.ErrorCode})")
         if printer_name:
             document.SetPrinter(printer_name, True)
-        for key, value in (values or {}).items():
-            obj = document.GetObject(str(key))
-            if obj is not None:
-                obj.Text = str(value)
-                filled.append(str(key))
+        if calibration:
+            text_count = int(document.GetTextCount())
+            if text_count <= 0:
+                raise RuntimeError(
+                    "Den valda .lbx-mallen har inga redigerbara textfält att kalibrera. "
+                    "Välj en etikettmall med minst ett textobjekt."
+                )
+            for index in range(text_count):
+                if not document.SetText(index, calibration_text(index)):
+                    raise RuntimeError(
+                        f"Kalibreringsmönstret kunde inte fylla textfält {index + 1}."
+                    )
+                filled.append(f"text_{index + 1}")
+        else:
+            for key, value in (values or {}).items():
+                obj = document.GetObject(str(key))
+                if obj is not None:
+                    obj.Text = str(value)
+                    filled.append(str(key))
         document.StartPrint(label_path.stem, _BPAC_PRINT_DEFAULT)
         document.PrintOut(copies, _BPAC_PRINT_DEFAULT)
         if not document.EndPrint():

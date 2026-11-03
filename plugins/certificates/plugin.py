@@ -382,12 +382,14 @@ class _LabelWorker(QRunnable):
         copies: int,
         values: dict[str, str],
         printer_name: str = "",
+        calibration: bool = False,
     ) -> None:
         super().__init__()
         self._label_path = label_path
         self._copies = copies
         self._values = values
         self._printer_name = printer_name
+        self._calibration = calibration
         self.signals = _WorkerSignals()
         self.setAutoDelete(True)
 
@@ -400,6 +402,7 @@ class _LabelWorker(QRunnable):
                     self._copies,
                     self._values,
                     printer_name=self._printer_name,
+                    calibration=self._calibration,
                 )
             )
         except Exception as exc:
@@ -524,7 +527,7 @@ class Plugin:
         self._customer_combo: QComboBox | None = None
         self._label_mapping_combo: QComboBox | None = None
         self._label_printer_button: QPushButton | None = None
-        self._label_printer_test_button: QPushButton | None = None
+        self._label_printer_calibration_button: QPushButton | None = None
         self._label_readiness_label: QLabel | None = None
         self._label_print_checkbox: QCheckBox | None = None
         self._pending_label_print = False
@@ -1226,14 +1229,14 @@ class Plugin:
         self._label_printer_button.setIconSize(QSize(self._sp(16), self._sp(16)))
         self._label_printer_button.clicked.connect(self._choose_label_printer)
         layout.addWidget(self._label_printer_button)
-        self._label_printer_test_button = QPushButton("Testa", frame)
-        self._label_printer_test_button.setIcon(self._standard_icon("SP_DialogApplyButton"))
-        self._label_printer_test_button.setIconSize(QSize(self._sp(15), self._sp(15)))
-        self._label_printer_test_button.setToolTip(
-            "Kontrollera drivrutin/spooler och skriv, vid bekräftelse, en testetikett utan intyg."
+        self._label_printer_calibration_button = QPushButton("Kalibrera", frame)
+        self._label_printer_calibration_button.setIcon(self._standard_icon("SP_DialogApplyButton"))
+        self._label_printer_calibration_button.setIconSize(QSize(self._sp(15), self._sp(15)))
+        self._label_printer_calibration_button.setToolTip(
+            "Skriv ut ett kalibreringsmönster på vald etikettmall utan att skapa ett intyg."
         )
-        self._label_printer_test_button.clicked.connect(self._test_label_printer)
-        layout.addWidget(self._label_printer_test_button)
+        self._label_printer_calibration_button.clicked.connect(self._calibrate_label_printer)
+        layout.addWidget(self._label_printer_calibration_button)
         self._refresh_label_mapping_combo(self._last_selected_name)
         self._refresh_label_printer_button()
         return frame
@@ -1322,18 +1325,18 @@ class Plugin:
         )
         self._update_label_print_option()
 
-    def _test_label_printer(self) -> None:
+    def _calibrate_label_printer(self) -> None:
         inspection = inspect_printer(self._label_printer_name)
         if not inspection.ready:
             QMessageBox.warning(
                 self._tab_widget,
-                "Skrivartest",
+                "Etikettkalibrering",
                 f"Skrivaren är inte redo.\n\n{inspection.message}\n\n"
                 f"Drivrutin: {inspection.driver or 'saknas'}",
             )
             self._evt(
-                "label.printer_test_failed",
-                f"Skrivartest misslyckades: {inspection.message}",
+                "label.calibration_prerequisite_failed",
+                f"Kalibrering kan inte starta: {inspection.message}",
                 level=logging.WARNING,
                 printer=inspection.name,
                 driver=inspection.driver,
@@ -1342,7 +1345,7 @@ class Plugin:
         if not _labels.bpac_available():
             QMessageBox.warning(
                 self._tab_widget,
-                "Skrivartest",
+                "Etikettkalibrering",
                 "Windows hittar skrivaren, men Brother b-PAC saknas. Installera b-PAC "
                 "för att skriva ut .lbx-etiketter.",
             )
@@ -1354,7 +1357,7 @@ class Plugin:
             if not available_labels:
                 QMessageBox.information(
                     self._tab_widget,
-                    "Skrivartest",
+                    "Etikettkalibrering",
                     "Windows kan öppna skrivaren och drivrutinen är installerad, men ingen "
                     ".lbx-etikettmall hittades i mappen Etiketter/.",
                 )
@@ -1365,8 +1368,8 @@ class Plugin:
                 display_names = [f"{path.stem} — {path.name}" for path in available_labels]
                 selected, accepted = QInputDialog.getItem(
                     self._tab_widget,
-                    "Välj testetikett",
-                    "Välj en .lbx-mall för testutskriften (ingen intygsgenerering görs):",
+                    "Välj kalibreringsetikett",
+                    "Välj vilken .lbx-mall som ska kalibreras (inget intyg skapas):",
                     display_names,
                     0,
                     False,
@@ -1376,22 +1379,17 @@ class Plugin:
                 mapped_label = available_labels[display_names.index(selected)]
         answer = QMessageBox.question(
             self._tab_widget,
-            "Skriv ut testetikett",
-            f"Skriv ut en testetikett med mallen {mapped_label.name}?\n\n"
-            "Utskriften använder texten TEST och förbrukar en etikett.",
+            "Skriv ut kalibreringsmönster",
+            f"Skriv ut ett kalibreringsmönster med mallen {mapped_label.name}?\n\n"
+            "Alla redigerbara textfält ersätts tillfälligt med en numrerad testskala. "
+            "Inga formulärvärden eller intyg används; statiskt innehåll i LBX-mallen "
+            "lämnas kvar. En etikett förbrukas.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        test_values = {key: "TEST" for key in self._collect_values()}
-        self._evt(
-            "label.printer_test_started",
-            f"Testutskrift startad: {mapped_label.name}",
-            printer=inspection.name,
-            driver=inspection.driver,
-        )
-        self._start_label_print(mapped_label, 1, test_values)
+        self._start_label_print(mapped_label, 1, {}, calibration=True)
 
     def _refresh_label_mapping_combo(self, template_name: str) -> None:
         combo = self._label_mapping_combo
@@ -2376,37 +2374,80 @@ class Plugin:
             return
         self._start_label_print(chosen, copies, dict(self._last_values))
 
-    def _start_label_print(self, chosen: Path, copies: int, values: dict[str, str]) -> None:
+    def _start_label_print(
+        self,
+        chosen: Path,
+        copies: int,
+        values: dict[str, str],
+        *,
+        calibration: bool = False,
+    ) -> None:
         printer_name = self._label_printer_name
         printer_label = printer_name or "Windows standardskrivare"
-        self._evt(
-            "label.print_started",
-            f"Skriver ut {copies} × {chosen.name} på {printer_label}",
-            label=chosen.name,
-            copies=copies,
-            printer=printer_label,
+        event = "label.calibration_started" if calibration else "label.print_started"
+        message = (
+            f"Kalibrerar {chosen.name} på {printer_label}"
+            if calibration else f"Skriver ut {copies} × {chosen.name} på {printer_label}"
         )
-        self._set_status(f"🏷️ Skriver ut {copies} etikett(er) på {printer_label}…")
-        worker = _LabelWorker(chosen, copies, values, printer_name)
-        worker.signals.finished.connect(self._on_label_finished, Qt.ConnectionType.QueuedConnection)
+        self._evt(event, message, label=chosen.name, copies=copies, printer=printer_label)
+        self._set_status(
+            f"🧭 Skriver ut kalibreringsmönster på {printer_label}…"
+            if calibration else f"🏷️ Skriver ut {copies} etikett(er) på {printer_label}…"
+        )
+        worker = _LabelWorker(chosen, copies, values, printer_name, calibration=calibration)
+        worker.signals.finished.connect(
+            lambda result, is_calibration=calibration: self._on_label_finished(
+                result, is_calibration
+            ),
+            Qt.ConnectionType.QueuedConnection,
+        )
         worker.signals.error.connect(
-            lambda error: self._on_label_finished(_labels.LabelResult(False, chosen.name, copies, error=error)),
+            lambda error, is_calibration=calibration: self._on_label_finished(
+                _labels.LabelResult(False, chosen.name, copies, error=error),
+                is_calibration,
+            ),
             Qt.ConnectionType.QueuedConnection,
         )
         self._start_worker(worker)
 
     @Slot(object)
-    def _on_label_finished(self, result: object) -> None:
+    def _on_label_finished(self, result: object, calibration: bool = False) -> None:
         if not isinstance(result, _labels.LabelResult):
             return
         if result.ok:
-            self._set_status(f"🏷️ {result.copies} etikett(er) utskrivna: {result.label}")
-            self._evt("label.printed", f"Etikett utskriven: {result.copies} × {result.label}",
-                      label=result.label, copies=result.copies, filled=result.filled,
-                      duration=round(result.duration, 2))
+            if calibration:
+                self._set_status(f"✅ Kalibreringsmönster utskrivet: {result.label}")
+                self._evt(
+                    "label.calibration_printed",
+                    f"Kalibreringsmönster utskrivet: {result.label}",
+                    label=result.label,
+                    printer=self._label_printer_name or "Windows standardskrivare",
+                    fields_filled=len(result.filled),
+                    duration=round(result.duration, 2),
+                )
+                QMessageBox.information(
+                    self._tab_widget,
+                    "Kalibrering utskriven",
+                    "Kontrollera att sifferföljden är tydlig och inte avklippt, och att "
+                    "texten hamnar där den förväntas på etiketten. Vid förskjutning eller "
+                    "klippning justerar du etikettformat, marginaler eller skalning i "
+                    "Brother-drivrutinen/P-touch Editor och skriver sedan ut mönstret igen.\n\n"
+                    "Kalibreringen använder tillfälliga testvärden; intyg och mallfil ändras inte.",
+                )
+            else:
+                self._set_status(f"🏷️ {result.copies} etikett(er) utskrivna: {result.label}")
+                self._evt(
+                    "label.printed",
+                    f"Etikett utskriven: {result.copies} × {result.label}",
+                    label=result.label,
+                    copies=result.copies,
+                    filled=result.filled,
+                    duration=round(result.duration, 2),
+                )
             return
         self._set_status(f"❌ Etikettutskrift misslyckades: {result.label}")
-        self._evt("label.print_failed", f"Etikettutskrift misslyckades: {result.error}",
+        event = "label.calibration_failed" if calibration else "label.print_failed"
+        self._evt(event, f"Etikettutskrift misslyckades: {result.error}",
                   level=logging.ERROR, label=result.label, error=result.error)
         QMessageBox.warning(self._tab_widget, "Etikett", result.error)
 
