@@ -23,6 +23,8 @@ from datetime import datetime
 from typing import Any, Callable
 
 from PySide6.QtCore import QEvent, Qt, Signal
+from .layout import field_column_count
+
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -146,14 +148,9 @@ class FieldsScrollArea(QScrollArea):
         self.scroll_to_top()
 
     def _column_count(self) -> int:
-        # Use logical widget width directly: scaling these breakpoints with the
-        # font metric made the two-column layout disappear at 125%/150% DPI.
+        # QWidget widths are Qt logical pixels; do not multiply by a DPI ratio.
         width = max(self.viewport().width(), self.width())
-        if width >= 1080:
-            return 3
-        if width >= 520:
-            return 2
-        return 1
+        return field_column_count(width)
 
     def _reflow_fields(self) -> None:
         columns = self._column_count()

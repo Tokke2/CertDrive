@@ -73,6 +73,7 @@ from .label_mappings import load_label_mappings, save_label_mappings
 from .printer_settings import (
     default_printer,
     installed_printers,
+    inspect_printer,
     load_printer_name,
     save_printer_name,
 )
@@ -523,6 +524,8 @@ class Plugin:
         self._customer_combo: QComboBox | None = None
         self._label_mapping_combo: QComboBox | None = None
         self._label_printer_button: QPushButton | None = None
+        self._label_printer_test_button: QPushButton | None = None
+        self._label_readiness_label: QLabel | None = None
         self._label_print_checkbox: QCheckBox | None = None
         self._pending_label_print = False
         self._pending_template_name = ""
@@ -1215,11 +1218,22 @@ class Plugin:
         self._label_print_checkbox.toggled.connect(self._on_label_print_toggled)
         self._label_print_checkbox.setEnabled(False)
         layout.addWidget(self._label_print_checkbox)
+        self._label_readiness_label = QLabel("Kontrollerar etikett…", frame)
+        self._label_readiness_label.setMinimumWidth(0)
+        layout.addWidget(self._label_readiness_label)
         self._label_printer_button = QPushButton(frame)
         self._label_printer_button.setIcon(self._standard_icon("SP_PrinterIcon"))
         self._label_printer_button.setIconSize(QSize(self._sp(16), self._sp(16)))
         self._label_printer_button.clicked.connect(self._choose_label_printer)
         layout.addWidget(self._label_printer_button)
+        self._label_printer_test_button = QPushButton("Testa", frame)
+        self._label_printer_test_button.setIcon(self._standard_icon("SP_DialogApplyButton"))
+        self._label_printer_test_button.setIconSize(QSize(self._sp(15), self._sp(15)))
+        self._label_printer_test_button.setToolTip(
+            "Kontrollera drivrutin/spooler och skriv, vid bekräftelse, en testetikett utan intyg."
+        )
+        self._label_printer_test_button.clicked.connect(self._test_label_printer)
+        layout.addWidget(self._label_printer_test_button)
         self._refresh_label_mapping_combo(self._last_selected_name)
         self._refresh_label_printer_button()
         return frame
@@ -1306,6 +1320,78 @@ class Plugin:
             f"Etikettskrivare vald: {selected_name}",
             printer=selected_name,
         )
+        self._update_label_print_option()
+
+    def _test_label_printer(self) -> None:
+        inspection = inspect_printer(self._label_printer_name)
+        if not inspection.ready:
+            QMessageBox.warning(
+                self._tab_widget,
+                "Skrivartest",
+                f"Skrivaren är inte redo.\n\n{inspection.message}\n\n"
+                f"Drivrutin: {inspection.driver or 'saknas'}",
+            )
+            self._evt(
+                "label.printer_test_failed",
+                f"Skrivartest misslyckades: {inspection.message}",
+                level=logging.WARNING,
+                printer=inspection.name,
+                driver=inspection.driver,
+            )
+            return
+        if not _labels.bpac_available():
+            QMessageBox.warning(
+                self._tab_widget,
+                "Skrivartest",
+                "Windows hittar skrivaren, men Brother b-PAC saknas. Installera b-PAC "
+                "för att skriva ut .lbx-etiketter.",
+            )
+            return
+        template_name, _template = self._selected_template()
+        mapped_label = self._mapped_label_path(template_name)
+        if mapped_label is None:
+            available_labels = _labels.find_labels(_labels.label_folder(self.templates_path))
+            if not available_labels:
+                QMessageBox.information(
+                    self._tab_widget,
+                    "Skrivartest",
+                    "Windows kan öppna skrivaren och drivrutinen är installerad, men ingen "
+                    ".lbx-etikettmall hittades i mappen Etiketter/.",
+                )
+                return
+            if len(available_labels) == 1:
+                mapped_label = available_labels[0]
+            else:
+                display_names = [f"{path.stem} — {path.name}" for path in available_labels]
+                selected, accepted = QInputDialog.getItem(
+                    self._tab_widget,
+                    "Välj testetikett",
+                    "Välj en .lbx-mall för testutskriften (ingen intygsgenerering görs):",
+                    display_names,
+                    0,
+                    False,
+                )
+                if not accepted:
+                    return
+                mapped_label = available_labels[display_names.index(selected)]
+        answer = QMessageBox.question(
+            self._tab_widget,
+            "Skriv ut testetikett",
+            f"Skriv ut en testetikett med mallen {mapped_label.name}?\n\n"
+            "Utskriften använder texten TEST och förbrukar en etikett.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        test_values = {key: "TEST" for key in self._collect_values()}
+        self._evt(
+            "label.printer_test_started",
+            f"Testutskrift startad: {mapped_label.name}",
+            printer=inspection.name,
+            driver=inspection.driver,
+        )
+        self._start_label_print(mapped_label, 1, test_values)
 
     def _refresh_label_mapping_combo(self, template_name: str) -> None:
         combo = self._label_mapping_combo
@@ -1398,7 +1484,11 @@ class Plugin:
         if checkbox is None:
             return
         template_name, _template = self._selected_template()
-        if not self._mapped_label_path(template_name) or not _labels.bpac_available():
+        if (
+            not self._mapped_label_path(template_name)
+            or not _labels.bpac_available()
+            or not inspect_printer(self._label_printer_name).ready
+        ):
             return
         checkbox.blockSignals(True)
         try:
@@ -1412,19 +1502,43 @@ class Plugin:
             return
         template_name, _template = self._selected_template()
         mapped_label = self._mapped_label_path(template_name)
-        can_print = bool(mapped_label and _labels.bpac_available())
+        bpac_ready = _labels.bpac_available()
+        printer = inspect_printer(self._label_printer_name)
+        can_print = bool(mapped_label and bpac_ready and printer.ready)
         checkbox.setEnabled(can_print)
         checkbox.setChecked(can_print)
+        readiness = self._label_readiness_label
+        if readiness is not None:
+            if mapped_label is None:
+                status = "Etikettmall saknas"
+                detail = (
+                    f"Välj en .lbx-etikett för intygsmallen {template_name}."
+                    if template_name else "Välj en intygsmall och koppla en .lbx-etikett."
+                )
+            elif not bpac_ready:
+                status = "b-PAC saknas"
+                detail = "Installera Brother b-PAC för automatisk .lbx-utskrift."
+            elif not printer.ready:
+                status = "Skrivare ej redo"
+                detail = printer.message
+            else:
+                status = "Redo"
+                detail = f"{mapped_label.name}; drivrutin: {printer.driver}. {printer.message}"
+            readiness.setText(status)
+            readiness.setToolTip(detail)
+
         if mapped_label is None:
             checkbox.setToolTip(
                 f"Välj en etikettmall för intygsmallen {template_name} först."
                 if template_name else "Välj en intygsmall och koppla en etikettmall först."
             )
-        elif not _labels.bpac_available():
+        elif not bpac_ready:
             checkbox.setToolTip("Automatisk utskrift kräver Windows och Brother b-PAC.")
+        elif not printer.ready:
+            checkbox.setToolTip(f"Skrivaren är inte redo: {printer.message}")
         else:
             checkbox.setToolTip(
-                f"{mapped_label.name} skrivs alltid ut efter att intyget har skapats."
+                f"{mapped_label.name} skrivs automatiskt ut efter att intyget har skapats."
             )
 
     def _refresh_customer_combo(self, selected_id: str | None = None) -> None:

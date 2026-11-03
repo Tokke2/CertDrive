@@ -6,10 +6,19 @@ import logging
 import os
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 _logger = logging.getLogger("Intyg.labels")
+
+
+@dataclass(frozen=True, slots=True)
+class PrinterInspection:
+    name: str = ""
+    driver: str = ""
+    ready: bool = False
+    message: str = ""
 
 
 def installed_printers() -> list[str]:
@@ -51,6 +60,66 @@ def default_printer() -> str:
         return str(win32print.GetDefaultPrinter() or "").strip()
     except Exception:
         return ""
+
+
+def inspect_printer(printer_name: str = "") -> PrinterInspection:
+    """Check whether Windows can open a selected printer and read its driver."""
+    if sys.platform != "win32":
+        return PrinterInspection(message="Etikettutskrift kräver Windows.")
+    try:
+        import win32print
+    except ImportError:
+        return PrinterInspection(message="pywin32/Windows utskriftstjänst saknas.")
+
+    try:
+        name = str(printer_name or win32print.GetDefaultPrinter() or "").strip()
+    except Exception as exc:
+        return PrinterInspection(message=f"Windows standardskrivare kunde inte läsas: {exc}")
+    if not name:
+        return PrinterInspection(message="Ingen standardskrivare är vald i Windows.")
+
+    handle: Any = None
+    try:
+        handle = win32print.OpenPrinter(name)
+        info = win32print.GetPrinter(handle, 2)
+        if isinstance(info, dict):
+            driver = str(info.get("pDriverName", "") or "").strip()
+            status = int(info.get("Status", 0) or 0)
+        elif isinstance(info, (tuple, list)):
+            driver = str(info[4] if len(info) > 4 else "").strip()
+            status = int(info[18] if len(info) > 18 else 0)
+        else:
+            driver, status = "", 0
+
+        problems = (
+            ("PRINTER_STATUS_ERROR", "Fel rapporterat av skrivaren"),
+            ("PRINTER_STATUS_PAPER_OUT", "Papper/etiketter saknas"),
+            ("PRINTER_STATUS_OFFLINE", "Skrivaren är offline"),
+            ("PRINTER_STATUS_PAPER_JAM", "Pappersstopp rapporterat"),
+            ("PRINTER_STATUS_NO_TONER", "Förbrukningsmaterial saknas"),
+            ("PRINTER_STATUS_DOOR_OPEN", "Skrivarluckan är öppen"),
+            ("PRINTER_STATUS_NOT_AVAILABLE", "Skrivaren är inte tillgänglig"),
+            ("PRINTER_STATUS_USER_INTERVENTION", "Skrivaren kräver åtgärd"),
+        )
+        messages = [
+            text for constant, text in problems
+            if status & int(getattr(win32print, constant, 0))
+        ]
+        if not driver:
+            messages.append("Windows rapporterar ingen installerad skrivardrivrutin")
+        ready = bool(driver) and not messages
+        summary = "; ".join(messages) if messages else (
+            "Windows-spoolern kan öppna skrivaren; fysisk utskrift testas separat."
+        )
+        return PrinterInspection(name=name, driver=driver, ready=ready, message=summary)
+    except Exception as exc:
+        return PrinterInspection(name=name, message=f"Skrivaren kunde inte öppnas: {exc}")
+    finally:
+        if handle is not None:
+            try:
+                win32print.ClosePrinter(handle)
+            except Exception:
+                _logger.debug("Kunde inte stänga skrivaren %s", name, exc_info=True)
 
 
 def load_printer_name(path: Path | str) -> str:

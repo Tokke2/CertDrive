@@ -434,6 +434,7 @@ try:
         stage_release_update,
         UPDATE_INTERVAL_HOURS,
     )
+    from core.support_bundle import write_support_bundle
 except Exception as exc:
     _stderr(f"KRITISKT: core/ kunde inte laddas: {exc}")
     _stderr(traceback.format_exc())
@@ -467,6 +468,7 @@ try:
     )
     from PySide6.QtWidgets import (
         QApplication,
+        QFileDialog,
         QFrame,
         QHBoxLayout,
         QLabel,
@@ -982,6 +984,13 @@ class MainWindow(QMainWindow):
             f"Om {APP_DISPLAY_NAME}",
             "SP_MessageBoxInformation",
             self._show_about,
+        )
+        help_menu.addSeparator()
+        self._add_action(
+            help_menu,
+            "Exportera supportdiagnostik…",
+            "SP_FileDialogDetailedView",
+            self._app._export_support_bundle,
         )
 
     def _build_central(self) -> None:
@@ -2354,6 +2363,124 @@ class Application:
 
     def _on_update_check_requested(self, _data: Any = None) -> None:
         QTimer.singleShot(0, lambda: self._start_release_check(manual=True))
+
+    def _collect_support_diagnostics(self) -> dict[str, Any]:
+        manager = self.plugin_manager
+        loaded = sorted(manager.loaded) if manager is not None else []
+        failed = sorted(manager.failed) if manager is not None else []
+        pending_path = APP_PATH / "js" / ".update-staging" / "pending.json"
+        pending = False
+        pending_commit = ""
+        try:
+            pending_data = json.loads(pending_path.read_text(encoding="utf-8"))
+            candidate = str(pending_data.get("commit_sha", "")).lower()
+            if re.fullmatch(r"[0-9a-f]{40}", candidate):
+                pending = True
+                pending_commit = candidate
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
+
+        display: dict[str, Any] = {}
+        try:
+            screen = self.qapp.primaryScreen() if self.qapp is not None else None
+            if screen is not None:
+                geometry = screen.availableGeometry()
+                display = {
+                    "width": int(geometry.width()),
+                    "height": int(geometry.height()),
+                    "scale_factor": round(float(screen.devicePixelRatio()), 2),
+                }
+        except Exception:
+            _logger.debug("Kunde inte samla skärmdiagnostik", exc_info=True)
+
+        label_info: dict[str, Any] = {
+            "bpac_available": False,
+            "installed_printer_count": 0,
+            "selected_printer_available": False,
+            "driver_available": False,
+            "label_mapping_available": False,
+            "automatic_print_ready": False,
+        }
+        try:
+            from plugins.certificates import labels as label_service
+            from plugins.certificates.printer_settings import (
+                inspect_printer,
+                installed_printers,
+            )
+
+            label_plugin = manager.loaded.get("certificates") if manager is not None else None
+            selected_printer = str(getattr(label_plugin, "_label_printer_name", "") or "")
+            printer = inspect_printer(selected_printer)
+            template_name = str(getattr(label_plugin, "_last_selected_name", "") or "")
+            mapped_label = (
+                label_plugin._mapped_label_path(template_name)
+                if label_plugin is not None and template_name else None
+            )
+            checkbox = getattr(label_plugin, "_label_print_checkbox", None)
+            label_info = {
+                "bpac_available": bool(label_service.bpac_available()),
+                "installed_printer_count": len(installed_printers()),
+                "selected_printer_available": bool(printer.ready),
+                "driver_available": bool(printer.driver),
+                "label_mapping_available": bool(mapped_label),
+                "automatic_print_ready": bool(
+                    checkbox is not None and checkbox.isEnabled() and checkbox.isChecked()
+                ),
+            }
+        except Exception:
+            _logger.debug("Kunde inte samla skrivardiagnostik", exc_info=True)
+
+        try:
+            from PySide6 import __version__ as qt_version
+        except Exception:
+            qt_version = "unknown"
+        return {
+            "app": {
+                "name": APP_DISPLAY_NAME,
+                "version": APP_VERSION,
+                "current_commit": get_current_commit(APP_PATH) or "unknown",
+            },
+            "runtime": {
+                "python": platform.python_version(),
+                "os": platform.system(),
+                "os_release": platform.release(),
+                "architecture": platform.machine(),
+                "qt": qt_version,
+            },
+            "plugins": {"loaded": loaded, "failed": failed},
+            "updater": {"pending": pending, "pending_commit": pending_commit},
+            "label_printer": label_info,
+            "display": display,
+        }
+
+    def _export_support_bundle(self) -> None:
+        suggested = Path.home() / f"IntygsDrive-support-{datetime.now():%Y%m%d-%H%M%S}.zip"
+        file_name, _selected_filter = QFileDialog.getSaveFileName(
+            self.window,
+            "Exportera supportdiagnostik",
+            str(suggested),
+            "Supportpaket (*.zip)",
+        )
+        if not file_name:
+            return
+        try:
+            destination = write_support_bundle(file_name, self._collect_support_diagnostics())
+        except Exception as exc:
+            _logger.exception("Kunde inte skapa supportpaket")
+            QMessageBox.warning(
+                self.window,
+                "Supportdiagnostik",
+                f"Supportpaketet kunde inte skapas: {exc}",
+            )
+            return
+        QMessageBox.information(
+            self.window,
+            "Supportdiagnostik exporterad",
+            "Supportpaketet skapades. Det innehåller endast teknisk diagnostik — "
+            "inga råloggar, kunduppgifter, dokument, mallar, skrivarnamn eller sökvägar.\n\n"
+            f"{destination}",
+        )
+        _evt("support.bundle_exported", "Sanerat supportpaket exporterades")
 
     def _cleanup(self) -> None:
         if self._cleanup_done:

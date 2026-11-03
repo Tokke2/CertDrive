@@ -48,6 +48,41 @@ class PrinterSettingsTests(unittest.TestCase):
         with patch.object(_MODULE.sys, "platform", "linux"):
             self.assertEqual(_MODULE.installed_printers(), [])
             self.assertEqual(_MODULE.default_printer(), "")
+            self.assertFalse(_MODULE.inspect_printer("Brother QL-500").ready)
+
+    def test_printer_inspection_reports_driver_and_online_state(self):
+        fake = types.SimpleNamespace(
+            GetDefaultPrinter=lambda: "Brother QL-500",
+            OpenPrinter=lambda name: ("handle", name),
+            GetPrinter=lambda _handle, _level: {
+                "pPrinterName": "Brother QL-500",
+                "pDriverName": "Brother QL-500",
+                "Status": 0,
+            },
+            ClosePrinter=lambda _handle: None,
+        )
+        with patch.object(_MODULE.sys, "platform", "win32"), patch.dict(sys.modules, {"win32print": fake}):
+            result = _MODULE.inspect_printer()
+        self.assertTrue(result.ready)
+        self.assertEqual(result.driver, "Brother QL-500")
+        self.assertIn("fysisk utskrift testas separat", result.message)
+
+    def test_printer_inspection_identifies_offline_printer(self):
+        fake = types.SimpleNamespace(
+            PRINTER_STATUS_OFFLINE=0x80,
+            GetDefaultPrinter=lambda: "Brother QL-500",
+            OpenPrinter=lambda name: ("handle", name),
+            GetPrinter=lambda _handle, _level: {
+                "pPrinterName": "Brother QL-500",
+                "pDriverName": "Brother QL-500",
+                "Status": 0x80,
+            },
+            ClosePrinter=lambda _handle: None,
+        )
+        with patch.object(_MODULE.sys, "platform", "win32"), patch.dict(sys.modules, {"win32print": fake}):
+            result = _MODULE.inspect_printer()
+        self.assertFalse(result.ready)
+        self.assertIn("offline", result.message)
 
 
 if __name__ == "__main__":
