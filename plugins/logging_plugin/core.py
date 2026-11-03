@@ -349,21 +349,35 @@ class ErrorSummaryFilter(logging.Filter):
         )
 
 
+def create_general_file_handler(
+    filename: Path | str,
+    session_id: str = SESSION_ID,
+) -> logging.FileHandler:
+    """Create the single all-level log file without rotation or backups."""
+    handler = logging.FileHandler(
+        str(filename),
+        mode="a",
+        encoding="utf-8",
+        delay=False,
+    )
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(DetailedFormatter(session_id))
+    handler._intygsdrive_general_handler = True  # type: ignore[attr-defined]
+    return handler
+
+
 def create_error_file_handler(
     filename: Path | str,
     session_id: str = SESSION_ID,
-) -> SmartRotatingHandler:
-    """Create a daily, error-only file handler for the app-wide error summary."""
-    path = Path(filename)
-    handler = SmartRotatingHandler(
-        str(path),
-        when="midnight",
-        backupCount=0,
+) -> logging.FileHandler:
+    """Create the second file: only errors and explicitly tagged failures."""
+    handler = logging.FileHandler(
+        str(filename),
+        mode="a",
         encoding="utf-8",
-        compress=True,
-        archive_dir=path.parent / "archive",
+        delay=False,
     )
-    handler.setLevel(logging.WARNING)
+    handler.setLevel(logging.DEBUG)
     handler.addFilter(ErrorSummaryFilter())
     handler.setFormatter(DetailedFormatter(session_id))
     handler._intygsdrive_error_handler = True  # type: ignore[attr-defined]
@@ -571,6 +585,7 @@ __all__: list[str] = [
     "LogStorage",
     "SmartRotatingHandler",
     "DetailedFormatter",
+    "create_general_file_handler",
     "create_error_file_handler",
     "ColorFormatter",
     "archive_old_logs",

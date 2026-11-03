@@ -2509,8 +2509,7 @@ class Application:
             self._activation_server.close()
             self._activation_server = None
 
-        # Rensa högst en gång per sjudagarsperiod innan konfigurationen stängs,
-        # så senaste lyckade körning kan sparas atomiskt.
+        # Rensa endast teknisk Python-cache när appen stängs; användardata lämnas orörd.
         self._cleanup_tech_cache()
 
         if self._config is not None:
@@ -2528,41 +2527,25 @@ class Application:
         _evt("main.cleanup_done", "Cleanup slutförd — appen avslutas normalt")
 
     def _cleanup_tech_cache(self) -> dict[str, int]:
-        """Rensa teknisk Python-cache högst en gång per vecka när smart_cache är på.
+        """Rensa teknisk Python-cache vid appavslut när smart_cache är på.
 
-        Användardata (settings, loggar, Mallar, Out, Skickade, Backup) lämnas
-        orörda. Datumet sparas först efter lyckad rensning.
+        Rensningen är begränsad till __pycache__/bytecode under APP_PATH och
+        lämnar inställningar, loggar och användardokument orörda.
         """
         empty: dict[str, int] = {"dirs": 0, "files": 0, "bytes": 0, "errors": 0}
         if not bool(self.config_value("smart_cache", True)):
-            _evt("main.cache_skipped", "Teknisk cache sparas (smart_cache avstangd)",
+            _evt("main.cache_skipped", "Teknisk cache sparas (smart_cache avstängd)",
                  level=logging.DEBUG)
             return empty
 
-        today = datetime.now().date()
-        last_raw = self.config_value("smart_cache_last_cleanup", "")
-        try:
-            last_cleanup = datetime.fromisoformat(str(last_raw)).date()
-        except (TypeError, ValueError):
-            last_cleanup = None
-        if last_cleanup is not None and (today - last_cleanup).days < 7:
-            _evt("main.cache_skipped", "Cache rensades nyligen; veckointervall gäller",
-                 level=logging.DEBUG, last_cleanup=last_cleanup.isoformat(),
-                 days_since=(today - last_cleanup).days)
-            return empty
         try:
             stats = clear_pycache(APP_PATH, dry_run=False)
         except Exception as exc:
             _evt("main.cache_clear_failed", f"Kunde inte rensa teknisk cache: {exc}",
                  level=logging.WARNING, error=str(exc))
             return empty
-        if not stats.get("errors", 0):
-            self.set_config_value(
-                "smart_cache_last_cleanup", today.isoformat(), auto_save=False
-            )
-            self.save_config(force=True)
-        else:
-            _evt("main.cache_clear_partial", "Cache-rensningen blev delvis; försök igen senare",
+        if stats.get("errors", 0):
+            _evt("main.cache_clear_partial", "Cache-rensningen blev delvis; försök igen vid nästa avslut",
                  level=logging.WARNING, errors=stats.get("errors", 0))
         msg = "Rensade {} __pycache__-mappar ({} filer, {} KB)".format(
             stats.get("dirs", 0), stats.get("files", 0), round(stats.get("bytes", 0) / 1024.0, 1)

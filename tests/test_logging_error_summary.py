@@ -17,9 +17,51 @@ LOGGING_CORE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = LOGGING_CORE
 SPEC.loader.exec_module(LOGGING_CORE)
 create_error_file_handler = LOGGING_CORE.create_error_file_handler
+create_general_file_handler = LOGGING_CORE.create_general_file_handler
 
 
 class ErrorSummaryLogTests(unittest.TestCase):
+    def test_logging_writes_only_general_and_error_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logger = logging.getLogger(f"two-file-logging-{id(root)}")
+            old_level, old_propagate = logger.level, logger.propagate
+            logger.setLevel(logging.DEBUG)
+            logger.propagate = False
+            general = create_general_file_handler(root / "app.log", "test-session")
+            errors = create_error_file_handler(root / "errors.log", "test-session")
+            logger.addHandler(general)
+            logger.addHandler(errors)
+            try:
+                logger.info("ordinary information marker")
+                logger.warning("ordinary warning marker")
+                logger.warning(
+                    "tagged failure warning",
+                    extra={"_intygsdrive_error_event": True},
+                )
+                logger.error("failure marker")
+                logger.handlers[0].flush()
+                logger.handlers[1].flush()
+            finally:
+                logger.removeHandler(general)
+                logger.removeHandler(errors)
+                general.close()
+                errors.close()
+                logger.setLevel(old_level)
+                logger.propagate = old_propagate
+
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["app.log", "errors.log"])
+            general_text = (root / "app.log").read_text(encoding="utf-8")
+            error_text = (root / "errors.log").read_text(encoding="utf-8")
+            self.assertIn("ordinary information marker", general_text)
+            self.assertIn("ordinary warning marker", general_text)
+            self.assertIn("tagged failure warning", general_text)
+            self.assertIn("failure marker", general_text)
+            self.assertIn("tagged failure warning", error_text)
+            self.assertIn("failure marker", error_text)
+            self.assertNotIn("ordinary information marker", error_text)
+            self.assertNotIn("ordinary warning marker", error_text)
+
     def test_collects_errors_and_tagged_failure_events_but_not_plain_warnings(self):
         with tempfile.TemporaryDirectory() as temporary:
             error_file = Path(temporary) / "errors.log"

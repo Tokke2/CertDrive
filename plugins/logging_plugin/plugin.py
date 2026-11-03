@@ -6,32 +6,13 @@ Fil:    plugins/logging_plugin/plugin.py
 Sökväg: Intygsgenerator/plugins/logging_plugin/plugin.py
 Version: 8.9.0 (uppgraderad från 8.8.1, 2026-09-18)
 
-Intygsgenerator — central logging-controller. Äger sessionloggning, JSONL-kö,
-crashhanterare, EventBus-observability, LOG-021-arkivering och Logger UI.
+Intygsgenerator — central logging-controller. Skriver all loggning till app.log
+och speglar fel till errors.log; behåller crash hooks, EventBus och Logger UI.
 
-Uppgradering 8.8.1 → 8.9.0 ("188888888% bättre", endast denna fil)
-===============================================================
-1. LOGGNING AV PRECIS ALLT:
-   - Varje on_load-steg tidsmäts och loggas ([STEP] namn, ms) — fel loggas med
-     traceback OCH räknas (step_failures i statistiken).
-   - Alla UI-operationer loggas: export (format+antal), öppna loggmapp,
-     alerts (visning/bekräftelse), live/detailed-lägen, rensning, refresh.
-   - Interceptor-droppar (kö full) räknas i stället för att släppas tyst.
-   - JSONL-skrivfel räknas och syns i statistiken/AI-rapporten.
-2. 10000% AI-FELSÖKNING:
-   - `ai_report()`/`diagnose()`: en enda Markdown-fil (logs/ai_report.md) med
-     sessionsstatistik, nivåfördelning, senaste poster, alerts, fs-sammanfattning,
-     droppar/skrivfel/stegfel — maskinläsbart och redo att klistras in i en AI.
-   - Heartbeat var 5:e minut (`[HEARTBEAT]`, avstängbar via
-     INTYGG_LOG_HEARTBEAT=0) bevisar att appen lever och ger AI:n tidsserie.
-3. BÄTTRE KOD/DESIGN: fail-safe bibehållet överallt, nya publika API:er är
-   additiva (inga signaturer ändrade — core/tracer/view fortsätter fungera).
-4. ANPASSAT I TEXT/FÖNSTER: statusrader och meddelanden korta och informativa;
-   selva UI-anpassningen görs i view.py (nästa fil jag vill ha).
-
-Oförändrat från 8.8.1: IPlugin-kontrakt, EventBus-ämnen (_TRACKED_EVENTS),
-LOG-021/retention, crash-hooks (excepthook/trådar/atexit/SIGTERM/SIGINT),
-JSONL-batchkörning, alerts med tröskel, exportformat, publikt API.
+Logglayout: exakt två loggerfiler — app.log innehåller alla nivåer och errors.log
+innehåller fel och uttryckligen markerade felhändelser. Loggar roteras eller arkiveras
+inte till extrafiler. Tidigare JSONL-, crash- och roterade loggar migreras in i de två
+filerna vid uppstart; gamla poster bevaras.
 """
 
 import atexit
@@ -41,7 +22,7 @@ import json
 import logging
 import os
 import queue
-import shutil
+import re
 import signal
 import sys
 import threading
@@ -59,14 +40,12 @@ from .core import (
     COPYRIGHT,
     SESSION_ID as CORE_SESSION_ID,
     ColorFormatter,
-    DetailedFormatter,
     create_error_file_handler,
+    create_general_file_handler,
     exception_details,
     LogEntry,
     LogStorage,
     QuickFilter,
-    SmartRotatingHandler,
-    archive_old_logs,
     export_csv,
     export_html,
     export_json,
@@ -124,7 +103,7 @@ class _InterceptorHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             # 9.0.0: event/ctx följer med (AI-kontraktet) så att strukturerad
-            # loggning från hela appen blir analyserbar i JSONL/export/vy.
+            # Loggning från hela appen blir analyserbar i de två loggfilerna och vyn.
             exception_type, exception = exception_details(record)
             entry = LogEntry(
                 id=0,
@@ -157,16 +136,13 @@ class Plugin:
 
     name: str = PLUGIN_NAME
     version: str = __version__
-    description: str = "Avancerad roterande loggning med sökning, filsystem-spårning och export"
+    description: str = "Loggning till app.log och errors.log med sökning, filsystemsspårning och export"
     priority: int = PLUGIN_PRIORITY
 
     MAX_MEMORY_ENTRIES: Final[int] = 50_000
     MAX_QUEUE_SIZE: Final[int] = 10_000
     UI_UPDATE_INTERVAL_MS: Final[int] = 250
     FS_FLUSH_INTERVAL_MS: Final[int] = 250
-    JSON_FLUSH_INTERVAL_SECONDS: Final[float] = 5.0
-    LOG_RETENTION_DAYS: Final[int] = 30
-    LOG_ARCHIVE_AFTER_DAYS: Final[int] = 21
     CONSECUTIVE_ERROR_THRESHOLD: Final[int] = 5
 
     def __init__(self) -> None:
@@ -175,6 +151,8 @@ class Plugin:
         self._unsubscribers: list[Callable[[], None]] = []
         self._root_logger: logging.Logger | None = None
         self._python_root_logger: logging.Logger | None = None
+        self._previous_python_root_level: int | None = None
+        self._general_handler: logging.Handler | None = None
         self._error_handler: logging.Handler | None = None
         self._interceptor: _InterceptorHandler | None = None
         self._previous_exception_hook: Any | None = None
@@ -182,10 +160,8 @@ class Plugin:
         self._hooks_installed = False
         self._loaded = False
         self._running = False
-        self._shutdown = threading.Event()
         self._stats_lock = threading.RLock()
         self._alerts_lock = threading.RLock()
-        self._json_lock = threading.Lock()
 
         self.session_id = CORE_SESSION_ID
         self.session_start = datetime.now()
@@ -198,7 +174,6 @@ class Plugin:
 
         self._storage = LogStorage(max_memory_entries=self.MAX_MEMORY_ENTRIES)
         self._queue: "queue.Queue[LogEntry]" = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
-        self._json_buffer: list[dict[str, Any]] = []
         self._signals = _LoggerSignals()
         self._tracer: FileSystemTracer | None = None
         self._view: LoggerView | None = None
@@ -214,8 +189,7 @@ class Plugin:
         self._warnings = 0
         self._live_mode = True
         self._detailed_mode = False
-        # v8.9.0: synlighet för tidigare tysta förluster
-        self._json_write_failures = 0
+        # Visibility into previously silent losses.
         self._step_failures = 0
         self._fs_operations = 0
         self._heartbeats = 0
@@ -229,9 +203,8 @@ class Plugin:
         self._event_bus = getattr(context, "event_bus", None)
         steps: tuple[tuple[str, Callable[[], None]], ...] = (
             ("sökvägar", self._setup_paths),
+            ("migrera äldre loggar", self._migrate_legacy_logs),
             ("logging", self._setup_logging),
-            ("arkivering", self._archive_old_logs),
-            ("retention", self._cleanup_old_logs),
             ("filsystem-spårning", self._setup_tracer),
             ("bakgrundsköer", self._start_background_threads),
             ("crashhanterare", self._install_crash_handlers),
@@ -292,10 +265,8 @@ class Plugin:
             except Exception:
                 _logger.exception("[LOGGING] Kunde inte avinstallera filsystem-tracer")
         self._running = False
-        self._shutdown.set()
         self._log_session_end()
         self._drain_queue()
-        self._flush_json(force=True)
         self._restore_crash_handlers()
         self._close_handlers()
         if self._fs_timer is not None:
@@ -360,60 +331,177 @@ class Plugin:
         if self.log_dir is None:
             self.log_dir = Path(__file__).resolve().parent.parent.parent / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.archive_dir = self.log_dir / "archive"
-        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        self.archive_dir = self.log_dir / "archive"  # legacy archive path; no new archive files
         self.current_log_file = self.log_dir / "app.log"
-        self.json_log_file = self.log_dir / f"session_{datetime.now():%Y-%m-%d}.jsonl"
-        self.crash_log_file = self.log_dir / "crash.log"
+        self.json_log_file = None  # JSONL events are stored in app.log/UI memory, not a third file
+        self.crash_log_file = None  # crashes are routed to both app.log and errors.log
         self.error_log_file = self.log_dir / "errors.log"
+
+    def _migrate_legacy_logs(self) -> None:
+        """Fold old JSONL/crash/rotated logs into the two current files safely."""
+        if self.log_dir is None or self.current_log_file is None or self.error_log_file is None:
+            return
+        sources: set[Path] = set()
+        for pattern in ("session_*.jsonl", "crash.log", "app.log.*", "errors.log.*"):
+            sources.update(path for path in self.log_dir.glob(pattern) if path.is_file())
+        if self.archive_dir is not None and self.archive_dir.is_dir():
+            sources.update(
+                path for path in self.archive_dir.rglob("*")
+                if path.is_file() and (path.suffix in {".gz", ".log", ".jsonl"})
+            )
+
+        def read_text(path: Path) -> str:
+            opener = gzip.open if path.suffix == ".gz" else open
+            with opener(path, "rb") as stream:
+                return stream.read().decode("utf-8", errors="replace")
+
+        def error_excerpt(path: Path, text: str) -> str:
+            name = path.name.casefold()
+            if "crash.log" in name or "errors.log" in name:
+                return text
+            if name.endswith((".jsonl", ".jsonl.gz")):
+                kept: list[str] = []
+                for line in text.splitlines():
+                    try:
+                        record = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    level = str(record.get("level", "")).upper()
+                    event = str(record.get("event", "")).casefold()
+                    message = str(record.get("message", "")).casefold()
+                    if level in {"ERROR", "CRITICAL"} or any(
+                        token in event or token in message
+                        for token in ("error", "failed", "crash", "exception")
+                    ):
+                        kept.append(line)
+                return "\n".join(kept)
+            kept = []
+            capturing = False
+            for line in text.splitlines():
+                is_record_start = bool(re.match(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}", line))
+                is_error_start = bool(re.search(r"\|\s*(ERROR|CRITICAL)\s*\|", line))
+                is_tagged_warning = bool(re.search(
+                    r"\|\s*WARNING\s*\|.*(?:error|failed|crash|exception|misslyck|fel)",
+                    line,
+                    re.IGNORECASE,
+                ))
+                if is_error_start or is_tagged_warning or "[CRASH]" in line:
+                    capturing = True
+                elif is_record_start:
+                    capturing = False
+                if capturing:
+                    kept.append(line)
+            return "\n".join(kept)
+
+        for source in sorted(sources, key=lambda item: str(item).casefold()):
+            try:
+                text = read_text(source)
+                relative = source.relative_to(self.log_dir).as_posix()
+                marker = f"[LEGACY LOG IMPORT] {relative}"
+                current_general = self.current_log_file.read_text(encoding="utf-8", errors="replace") \
+                    if self.current_log_file.is_file() else ""
+                if marker not in current_general:
+                    with self.current_log_file.open("a", encoding="utf-8", newline="\n") as stream:
+                        stream.write(f"\n{marker}\n{text}\n")
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                errors = error_excerpt(source, text)
+                if errors:
+                    current_errors = self.error_log_file.read_text(encoding="utf-8", errors="replace") \
+                        if self.error_log_file.is_file() else ""
+                    if marker not in current_errors:
+                        with self.error_log_file.open("a", encoding="utf-8", newline="\n") as stream:
+                            stream.write(f"\n{marker}\n{errors}\n")
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                source.unlink()
+            except OSError:
+                _logger.exception("[LOGGING] Kunde inte migrera äldre loggfil %s", source.name)
+
+        # app.log itself is the general destination and must stay in place; copy
+        # its historical errors to the error file once without removing history.
+        try:
+            if self.current_log_file.is_file():
+                current_text = self.current_log_file.read_text(encoding="utf-8", errors="replace")
+                errors = error_excerpt(self.current_log_file, current_text)
+                marker = "[LEGACY LOG ERRORS IMPORT] app.log"
+                if errors:
+                    current_errors = self.error_log_file.read_text(encoding="utf-8", errors="replace") \
+                        if self.error_log_file.is_file() else ""
+                    if errors not in current_errors and marker not in current_errors:
+                        with self.error_log_file.open("a", encoding="utf-8", newline="\n") as stream:
+                            stream.write(f"\n{marker}\n{errors}\n")
+                            stream.flush()
+                            os.fsync(stream.fileno())
+        except OSError:
+            _logger.exception("[LOGGING] Kunde inte kopiera historiska fel från app.log")
+
+        if self.archive_dir is not None and self.archive_dir.is_dir():
+            for directory in sorted(self.archive_dir.rglob("*"), reverse=True):
+                if directory.is_dir():
+                    with contextlib.suppress(OSError):
+                        directory.rmdir()
+            with contextlib.suppress(OSError):
+                self.archive_dir.rmdir()
 
     def _setup_logging(self) -> None:
         logger = logging.getLogger("Intygsgenerator")
         logger.setLevel(logging.DEBUG)
-        # The app logger is isolated from global console logging; attach the
-        # summary handler to both it and Python root to catch both namespaces.
         logger.propagate = False
         python_root = logging.getLogger()
         self._python_root_logger = python_root
+        self._previous_python_root_level = python_root.level
+        python_root.setLevel(logging.DEBUG)
+
         for existing in list(python_root.handlers):
-            if getattr(existing, "_intygsdrive_error_handler", False):
+            if getattr(existing, "_intygsdrive_general_handler", False) or getattr(
+                existing, "_intygsdrive_error_handler", False
+            ):
                 python_root.removeHandler(existing)
                 with contextlib.suppress(Exception):
                     existing.close()
         for handler in list(logger.handlers):
+            logger.removeHandler(handler)
             with contextlib.suppress(Exception):
                 handler.close()
-            logger.removeHandler(handler)
+
         if getattr(sys.stderr, "isatty", lambda: False)():
             console = logging.StreamHandler(sys.stderr)
             console.setLevel(logging.INFO)
             console.setFormatter(ColorFormatter(use_colors=True))
             logger.addHandler(console)
-        if self.current_log_file is not None:
-            file_handler = SmartRotatingHandler(
-                str(self.current_log_file),
-                when="midnight",
-                backupCount=self.LOG_RETENTION_DAYS,
-                maxBytes=10_000_000,
-                compress=True,
-            )
-            file_handler.setLevel(logging.DEBUG)
-            file_handler.setFormatter(DetailedFormatter())
-            logger.addHandler(file_handler)
+
+        handlers: list[logging.Handler] = []
+        try:
+            if self.current_log_file is not None:
+                self._general_handler = create_general_file_handler(
+                    self.current_log_file, self.session_id
+                )
+                handlers.append(self._general_handler)
+            if self.error_log_file is not None:
+                self._error_handler = create_error_file_handler(
+                    self.error_log_file, self.session_id
+                )
+                handlers.append(self._error_handler)
+            for handler in handlers:
+                logger.addHandler(handler)
+                python_root.addHandler(handler)
+        except Exception:
+            for handler in handlers:
+                with contextlib.suppress(Exception):
+                    logger.removeHandler(handler)
+                    python_root.removeHandler(handler)
+                    handler.close()
+            self._general_handler = None
+            self._error_handler = None
+            logger.exception("[LOGGING] Kunde inte aktivera app.log och errors.log")
+
         self._interceptor = _InterceptorHandler(self._queue, self.session_id)
         self._interceptor.setLevel(logging.DEBUG)
         logger.addHandler(self._interceptor)
         self._root_logger = logger
-        if self.error_log_file is not None:
-            try:
-                self._error_handler = create_error_file_handler(
-                    self.error_log_file, self.session_id
-                )
-                logger.addHandler(self._error_handler)
-                python_root.addHandler(self._error_handler)
-            except Exception:
-                self._error_handler = None
-                logger.exception("[LOGGING] Kunde inte aktivera errors.log")
 
     def _setup_tracer(self) -> None:
         self._tracer = FileSystemTracer(self._on_file_operation)
@@ -422,9 +510,7 @@ class Plugin:
 
     def _start_background_threads(self) -> None:
         self._running = True
-        self._shutdown.clear()
         threading.Thread(target=self._process_queue, name="LogProcessor", daemon=True).start()
-        threading.Thread(target=self._json_writer_loop, name="JSONWriter", daemon=True).start()
 
     def _subscribe_events(self) -> None:
         if self._event_bus is None:
@@ -440,52 +526,7 @@ class Plugin:
             except Exception:
                 _logger.exception("[LOGGING] Kunde inte prenumerera på %s", event_name)
 
-    # ── LOG-021 och retention ─────────────────────────────────────────────
-
-    def _archive_old_logs(self) -> None:
-        if self.log_dir is None:
-            return
-        archived = archive_old_logs(self.log_dir, self.LOG_ARCHIVE_AFTER_DAYS)
-        cutoff = datetime.now() - timedelta(days=self.LOG_ARCHIVE_AFTER_DAYS)
-        if self.archive_dir is not None:
-            for file_path in self.log_dir.glob("*.jsonl"):
-                try:
-                    if datetime.fromtimestamp(file_path.stat().st_mtime) >= cutoff:
-                        continue
-                    destination = self.archive_dir / f"{file_path.name}.gz"
-                    if destination.exists():
-                        continue
-                    temporary = destination.with_suffix(".gz.tmp")
-                    with file_path.open("rb") as source, gzip.open(temporary, "wb") as target:
-                        shutil.copyfileobj(source, target)
-                    temporary.replace(destination)
-                    file_path.unlink()
-                    archived += 1
-                except OSError:
-                    _logger.exception("[LOGGING] Kunde inte arkivera JSONL %s", file_path)
-        if archived:
-            self._safe_log("info", f"[LOGGER] Arkiverade {archived} loggfil(er) till logs/archive/")
-
-    def _cleanup_old_logs(self) -> None:
-        if self.log_dir is None:
-            return
-        cutoff = datetime.now() - timedelta(days=self.LOG_RETENTION_DAYS)
-        deleted = 0
-        for file_path in self.log_dir.glob("*"):
-            if not file_path.is_file() or file_path.name == "crash.log":
-                continue
-            if file_path.suffix not in {".log", ".jsonl", ".gz"}:
-                continue
-            try:
-                if datetime.fromtimestamp(file_path.stat().st_mtime) < cutoff:
-                    file_path.unlink()
-                    deleted += 1
-            except OSError:
-                _logger.exception("[LOGGING] Kunde inte rensa %s", file_path)
-        if deleted:
-            self._safe_log("debug", f"[LOGGER] Raderade {deleted} gamla aktiva loggfil(er)")
-
-    # ── Queue, JSONL och statistik ────────────────────────────────────────
+    # ── Queue och statistik ──────────────────────────────────────────────
 
     def _process_queue(self) -> None:
         batch: list[LogEntry] = []
@@ -505,8 +546,6 @@ class Plugin:
                     for entry in batch:
                         self._storage.add(entry)
                         self._update_stats(entry)
-                        with self._json_lock:
-                            self._json_buffer.append(entry.to_dict())
                         self._check_alerts(entry)
                     batch.clear()
                 now = datetime.now().timestamp()
@@ -525,8 +564,6 @@ class Plugin:
             except queue.Empty:
                 return
             self._storage.add(entry)
-            with self._json_lock:
-                self._json_buffer.append(entry.to_dict())
 
     def _update_stats(self, entry: LogEntry) -> None:
         with self._stats_lock:
@@ -559,29 +596,6 @@ class Plugin:
             })
         self._signals.alert_raised.emit(title)
 
-    def _json_writer_loop(self) -> None:
-        while self._running:
-            self._shutdown.wait(self.JSON_FLUSH_INTERVAL_SECONDS)
-            if self._running:
-                self._flush_json()
-
-    def _flush_json(self, force: bool = False) -> None:
-        with self._json_lock:
-            if not self._json_buffer and not force:
-                return
-            records = list(self._json_buffer)
-            self._json_buffer.clear()
-        if not records or self.json_log_file is None:
-            return
-        try:
-            self.json_log_file.parent.mkdir(parents=True, exist_ok=True)
-            with self.json_log_file.open("a", encoding="utf-8") as handle:
-                for record in records:
-                    handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-        except OSError:
-            self._json_write_failures += 1
-            _logger.exception("[LOGGING] Kunde inte skriva JSONL")
-
     # ── Heartbeat (v8.9.0) ────────────────────────────────────────────────
 
     def _start_heartbeat(self) -> None:
@@ -604,7 +618,7 @@ class Plugin:
             "info",
             f"[HEARTBEAT] levande: events={self._storage.count} fel={self._errors} "
             f"var={self._warnings} intyg={self._certificates_generated} "
-            f"fs={self._fs_operations} dropp={dropped} jsonfel={self._json_write_failures}",
+            f"fs={self._fs_operations} dropp={dropped}",
         )
 
     # ── EventBus och FS ───────────────────────────────────────────────────
@@ -679,7 +693,8 @@ class Plugin:
         self._hooks_installed = False
 
     def _on_exit(self) -> None:
-        self._flush_json(force=True)
+        # FileHandlers write synchronously; stopping the in-memory UI queue is enough.
+        self._running = False
 
     def _on_unhandled_exception(self, exc_type: type[BaseException], exc_value: BaseException, exc_traceback: Any) -> None:
         if issubclass(exc_type, KeyboardInterrupt):
@@ -688,35 +703,17 @@ class Plugin:
             return
         trace = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
         self._safe_log("critical", f"[CRASH] {exc_type.__name__}:\n{trace}")
-        self._write_crash_log({"type": exc_type.__name__, "message": str(exc_value), "traceback": trace})
         self._emit("logging.crash_detected", {"type": exc_type.__name__, "message": str(exc_value), "timestamp": datetime.now().isoformat(timespec="seconds")})
-        self._flush_json(force=True)
 
     def _on_thread_exception(self, args: "threading.ExceptHookArgs") -> None:
         if args.exc_type is None or issubclass(args.exc_type, SystemExit):
             return
         trace = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
         self._safe_log("error", f"[CRASH] Tråd {args.thread}: {args.exc_type.__name__}\n{trace}")
-        self._write_crash_log({"type": args.exc_type.__name__, "thread": str(args.thread), "traceback": trace})
 
     def _on_signal(self, signum: int, _frame: Any) -> None:
         with contextlib.suppress(Exception):
             self._safe_log("info", f"[LOGGER] Signal: {signal.Signals(signum).name}")
-            self._flush_json(force=True)
-
-    def _write_crash_log(self, data: dict[str, Any]) -> None:
-        if self.crash_log_file is None:
-            return
-        lines = ["", "=" * 60, f"CRASH: {datetime.now().isoformat()}", f"Session: {self.session_id}"]
-        for key, value in data.items():
-            lines.append(f"{key}: {value}")
-        lines.append("=" * 60)
-        try:
-            self.crash_log_file.parent.mkdir(parents=True, exist_ok=True)
-            with self.crash_log_file.open("a", encoding="utf-8") as handle:
-                handle.write("\n".join(lines) + "\n")
-        except OSError:
-            _logger.exception("[LOGGING] Kunde inte skriva crash.log")
 
     # ── Session och UI ────────────────────────────────────────────────────
 
@@ -918,7 +915,7 @@ class Plugin:
             "",
             "## Hälsa / tysta förluster",
             f"- Interceptor-droppar (kö full): {dropped}",
-            f"- JSONL-skrivfel: {self._json_write_failures}",
+            "- Loggfilslayout: app.log innehåller allt; errors.log innehåller endast fel.",
             f"- on_load-stegfel: {self._step_failures}",
             f"- Heartbeats: {self._heartbeats} · fs-operationer: {self._fs_operations}",
             "",
@@ -959,7 +956,6 @@ class Plugin:
         return self.get_statistics() | {
             "version": self.version,
             "interceptor_dropped": self._interceptor.dropped if self._interceptor else 0,
-            "json_write_failures": self._json_write_failures,
             "step_failures": self._step_failures,
             "heartbeats": self._heartbeats,
             "fs_operations_total": self._fs_operations,
@@ -1026,19 +1022,32 @@ class Plugin:
             return
 
     def _close_handlers(self) -> None:
-        if self._error_handler is not None:
-            if self._python_root_logger is not None:
-                self._python_root_logger.removeHandler(self._error_handler)
-            if self._root_logger is not None:
-                self._root_logger.removeHandler(self._error_handler)
+        root = self._root_logger
+        python_root = self._python_root_logger
+        owned = {
+            handler for handler in
+            (self._general_handler, self._error_handler, self._interceptor)
+            if handler is not None
+        }
+        for handler in owned:
+            if root is not None:
+                root.removeHandler(handler)
+            if python_root is not None:
+                python_root.removeHandler(handler)
             with contextlib.suppress(Exception):
-                self._error_handler.flush()
-                self._error_handler.close()
-            self._error_handler = None
-        if self._root_logger is not None:
-            for handler in list(self._root_logger.handlers):
+                handler.flush()
+                handler.close()
+        if root is not None:
+            for handler in list(root.handlers):
+                root.removeHandler(handler)
                 with contextlib.suppress(Exception):
                     handler.flush()
                     handler.close()
-                self._root_logger.removeHandler(handler)
+        if python_root is not None and self._previous_python_root_level is not None:
+            python_root.setLevel(self._previous_python_root_level)
+        self._general_handler = None
+        self._error_handler = None
+        self._interceptor = None
+        self._previous_python_root_level = None
+        self._root_logger = None
         self._python_root_logger = None
