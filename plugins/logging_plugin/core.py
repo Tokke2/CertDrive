@@ -20,6 +20,7 @@ Version 9.0.0 (2026-09-21): kompat-yta mot plugin.py + uppgraderingar:
 
 import csv as _csv
 import gzip
+import hashlib
 import html as _html
 import json
 import logging
@@ -275,10 +276,8 @@ class LogStorage:
 class SmartRotatingHandler(TimedRotatingFileHandler):
     """Dagsroterande logg: aktiv fil är ALLTID endast dagens logg.
 
-    9.1.0 (ny loggpolicy): vid midnattsrotation (och vid uppstart om appen
-    missade midnatten) gzip-komprimeras den daterade filen till archive/ och
-    tas bort — kvar i loggmappen finns bara dagens logg. Arkivet rensas sedan
-    av archive_old_logs() efter 3 veckor (LOG-021 reviderad 2026-09-22).
+    Vid midnattsrotation komprimeras den daterade filen till archive/ och tas
+    bort från den aktiva mappen. Arkivfiler lämnas kvar tills de tas bort separat.
     """
 
     def __init__(
@@ -349,16 +348,167 @@ class ErrorSummaryFilter(logging.Filter):
         )
 
 
+class ErrorLedgerHandler(logging.FileHandler):
+    """Persist errors until a matching success signal automatically resolves them."""
+
+    _EVENT_GROUPS = {
+        "certificate.generation_failed": "certificate.generation",
+        "certificate.generated": "certificate.generation",
+        "cert.generate_failed": "cert.generate",
+        "cert.generated": "cert.generate",
+        "label.calibration_failed": "label.calibration",
+        "label.calibration_printed": "label.calibration",
+        "label.print_failed": "label.print",
+        "label.printed": "label.print",
+        "certificates.batch.failed": "certificates.batch",
+        "certificates.batch.completed": "certificates.batch",
+    }
+    _SUCCESS_TERMS = (
+        "success", "succeeded", "completed", "generated", "saved", "updated",
+        "restored", "printed", "recovered", "finished", "lyckades", "slutförd",
+        "slutfört", "sparad", "sparat", "uppdaterad", "återställd", "genererad",
+        "utskriven", "färdig", "klart", "återhämtad",
+    )
+    _FAILURE_TERMS = (
+        "unsuccessful", "failed", "failure", "error", "exception", "unable",
+        "could not", "cannot", "can't", "never", "not ", "no ", "inte ", "ej ",
+        "misslyck", "fel ",
+    )
+
+    def __init__(self, filename: Path | str, session_id: str = SESSION_ID) -> None:
+        path = Path(filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        super().__init__(str(path), mode="a", encoding="utf-8", delay=False)
+        self.setLevel(logging.DEBUG)
+        self.setFormatter(DetailedFormatter(session_id))
+        self.active_errors: dict[str, str] = {}
+        self._load_active_errors(path)
+        self._intygsdrive_error_handler = True  # type: ignore[attr-defined]
+
+    @classmethod
+    def _event_name(cls, record: logging.LogRecord) -> str:
+        event = getattr(record, "event", None)
+        if event:
+            return str(event).strip().casefold()
+        message = record.getMessage()
+        if message.startswith("[EVENT] "):
+            return message[len("[EVENT] "):].split(maxsplit=1)[0].casefold()
+        return ""
+
+    @classmethod
+    def _event_group(cls, event: str) -> str:
+        return cls._EVENT_GROUPS.get(event, "")
+
+    @classmethod
+    def _source_key(cls, record: logging.LogRecord, event: str) -> str:
+        if event:
+            group = cls._event_group(event)
+            return f"event:{group or event}"
+        return "call:{}|{}|{}".format(
+            record.name,
+            record.pathname,
+            record.funcName,
+        )
+
+    def _load_active_errors(self, path: Path) -> None:
+        if not path.is_file():
+            return
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            _logger.exception("Could not restore active errors from %s", path)
+            return
+        for line in lines:
+            try:
+                if line.startswith("[ERROR OPEN] "):
+                    data = json.loads(line[len("[ERROR OPEN] "):])
+                    self.active_errors[str(data["id"])] = str(data["source"])
+                elif line.startswith("[ERROR RESOLVED] "):
+                    data = json.loads(line[len("[ERROR RESOLVED] "):])
+                    self.active_errors.pop(str(data["id"]), None)
+            except (ValueError, KeyError, TypeError):
+                continue
+
+    def _write_line(self, text: str) -> None:
+        if self.stream is None:
+            self.stream = self._open()
+        self.stream.write(text + "\n")
+        self.flush()
+
+    def _write_metadata(self, kind: str, payload: dict[str, Any]) -> None:
+        self._write_line(f"[ERROR {kind}] " + json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    def _record_error(self, record: logging.LogRecord, source: str) -> None:
+        issue_id = hashlib.sha256(source.encode("utf-8", errors="replace")).hexdigest()[:16]
+        if issue_id not in self.active_errors:
+            self.active_errors[issue_id] = source
+            self._write_metadata("OPEN", {
+                "id": issue_id,
+                "source": source,
+                "opened": datetime.fromtimestamp(record.created).isoformat(timespec="seconds"),
+            })
+        else:
+            self._write_metadata("REPEAT", {
+                "id": issue_id,
+                "at": datetime.fromtimestamp(record.created).isoformat(timespec="seconds"),
+            })
+        self._write_line(f"[ERROR RECORD id={issue_id}] {self.format(record)}")
+
+    def _resolve(self, record: logging.LogRecord, event: str) -> None:
+        if not self.active_errors:
+            return
+        success_source = self._source_key(record, event) if event else ""
+        if not success_source:
+            if record.levelno > logging.INFO:
+                return
+            message = record.getMessage().casefold()
+            if any(term in message for term in self._FAILURE_TERMS):
+                return
+            if not any(term in message for term in self._SUCCESS_TERMS):
+                return
+            success_source = self._source_key(record, "")
+
+        resolved = [
+            issue_id for issue_id, source in self.active_errors.items()
+            if source == success_source
+        ]
+        for issue_id in resolved:
+            self._write_metadata("RESOLVED", {
+                "id": issue_id,
+                "source": success_source,
+                "at": datetime.fromtimestamp(record.created).isoformat(timespec="seconds"),
+            })
+            self.active_errors.pop(issue_id, None)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            is_failure = record.levelno >= logging.ERROR or bool(
+                getattr(record, "_intygsdrive_error_event", False)
+            )
+            event = self._event_name(record)
+            if is_failure:
+                self._record_error(record, self._source_key(record, event))
+            else:
+                self._resolve(record, event)
+        except Exception:
+            self.handleError(record)
+
+
 def create_general_file_handler(
     filename: Path | str,
     session_id: str = SESSION_ID,
-) -> logging.FileHandler:
-    """Create the single all-level log file without rotation or backups."""
-    handler = logging.FileHandler(
-        str(filename),
-        mode="a",
+    *,
+    archive_dir: Path | str | None = None,
+) -> SmartRotatingHandler:
+    """Create the all-level log, archiving each completed calendar day."""
+    path = Path(filename)
+    handler = SmartRotatingHandler(
+        str(path),
+        when="midnight",
+        backupCount=0,
         encoding="utf-8",
-        delay=False,
+        compress=True,
+        archive_dir=archive_dir or path.parent / "archive",
     )
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(DetailedFormatter(session_id))
@@ -369,19 +519,9 @@ def create_general_file_handler(
 def create_error_file_handler(
     filename: Path | str,
     session_id: str = SESSION_ID,
-) -> logging.FileHandler:
-    """Create the second file: only errors and explicitly tagged failures."""
-    handler = logging.FileHandler(
-        str(filename),
-        mode="a",
-        encoding="utf-8",
-        delay=False,
-    )
-    handler.setLevel(logging.DEBUG)
-    handler.addFilter(ErrorSummaryFilter())
-    handler.setFormatter(DetailedFormatter(session_id))
-    handler._intygsdrive_error_handler = True  # type: ignore[attr-defined]
-    return handler
+) -> ErrorLedgerHandler:
+    """Create the durable, automatically resolved error ledger."""
+    return ErrorLedgerHandler(filename, session_id)
 
 
 class ColorFormatter(logging.Formatter):
@@ -585,6 +725,7 @@ __all__: list[str] = [
     "LogStorage",
     "SmartRotatingHandler",
     "DetailedFormatter",
+    "ErrorLedgerHandler",
     "create_general_file_handler",
     "create_error_file_handler",
     "ColorFormatter",

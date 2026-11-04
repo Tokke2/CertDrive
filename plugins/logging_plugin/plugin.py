@@ -9,10 +9,9 @@ Version: 8.9.0 (uppgraderad från 8.8.1, 2026-09-18)
 Intygsgenerator — central logging-controller. Skriver all loggning till app.log
 och speglar fel till errors.log; behåller crash hooks, EventBus och Logger UI.
 
-Logglayout: exakt två loggerfiler i <app>/logs/logging/ — app.log innehåller alla
-nivåer och errors.log innehåller fel och uttryckligen markerade felhändelser. Loggar
-roteras eller arkiveras inte till extrafiler. Äldre loggerfiler migreras dit vid
-uppstart och tas bort först efter att innehållet har skrivits säkert till de nya filerna.
+Logglayout: <app>/logs/logging/app.log innehåller alla nivåer och roteras vid midnatt
+till archive/. errors.log är en separat fellogg med öppna/åtgärdade markeringar; den
+arkiveras inte bort. Äldre loggerfiler flyttas säkert till den nya mappen vid uppstart.
 """
 
 import atexit
@@ -24,7 +23,9 @@ import os
 import queue
 import re
 import signal
+import stat
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -205,6 +206,7 @@ class Plugin:
         steps: tuple[tuple[str, Callable[[], None]], ...] = (
             ("sökvägar", self._setup_paths),
             ("migrera äldre loggar", self._migrate_legacy_logs),
+            ("arkivera tidigare dagar", self._archive_previous_days),
             ("logging", self._setup_logging),
             ("filsystem-spårning", self._setup_tracer),
             ("bakgrundsköer", self._start_background_threads),
@@ -464,6 +466,77 @@ class Plugin:
                 with contextlib.suppress(OSError):
                     archive.rmdir()
 
+    def _archive_previous_days(self) -> None:
+        """Archive dated app.log entries before today, preserving today's lines."""
+        if self.log_dir is None or self.current_log_file is None or self.archive_dir is None:
+            return
+        path = self.current_log_file
+        if not path.is_file():
+            return
+        today = datetime.now().date()
+        try:
+            file_stat = path.stat()
+            fallback_day = datetime.fromtimestamp(file_stat.st_mtime).date()
+            original_mode = stat.S_IMODE(file_stat.st_mode)
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        except OSError:
+            _logger.exception("[LOGGING] Kunde inte läsa logg inför dagsarkivering")
+            return
+
+        grouped: dict[Any, list[str]] = {}
+        current_day = fallback_day
+        for line in lines:
+            match = re.match(r"^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}", line)
+            if match:
+                with contextlib.suppress(ValueError):
+                    current_day = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+            elif line.startswith("{"):
+                try:
+                    record = json.loads(line)
+                    timestamp = record.get("timestamp") if isinstance(record, dict) else None
+                    if timestamp:
+                        with contextlib.suppress(ValueError, TypeError):
+                            current_day = datetime.fromisoformat(str(timestamp)).date()
+                except (ValueError, TypeError):
+                    pass
+            grouped.setdefault(current_day, []).append(line)
+
+        old_days = sorted(day for day in grouped if day < today)
+        if not old_days:
+            return
+        try:
+            self.archive_dir.mkdir(parents=True, exist_ok=True)
+            for day in old_days:
+                destination = self.archive_dir / f"app.log.{day:%Y-%m-%d}.gz"
+                payload = "".join(grouped[day]).encode("utf-8")
+                with destination.open("ab") as raw:
+                    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as archive:
+                        archive.write(payload)
+                    raw.flush()
+                    os.fsync(raw.fileno())
+
+            remaining = "".join(
+                line for day in sorted(grouped) if day >= today for line in grouped[day]
+            )
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".app.log.", suffix=".tmp", dir=self.log_dir
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                    stream.write(remaining)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.chmod(temporary, original_mode)
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            for day in old_days:
+                _logger.debug("[LOGGING] Dagslogg arkiverad: app.log.%s.gz", day.isoformat())
+        except OSError:
+            # Keep app.log intact if any archive or rewrite operation fails.
+            _logger.exception("[LOGGING] Kunde inte arkivera föregående dagsloggar")
+
     def _setup_logging(self) -> None:
         logger = logging.getLogger("Intygsgenerator")
         logger.setLevel(logging.DEBUG)
@@ -495,7 +568,9 @@ class Plugin:
         try:
             if self.current_log_file is not None:
                 self._general_handler = create_general_file_handler(
-                    self.current_log_file, self.session_id
+                    self.current_log_file,
+                    self.session_id,
+                    archive_dir=self.archive_dir,
                 )
                 handlers.append(self._general_handler)
             if self.error_log_file is not None:
@@ -791,7 +866,11 @@ class Plugin:
             ]
             for level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
                 lines.append(f"{level:<10} {storage_stats.events_by_level.get(level, 0):>6}")
-            lines.extend(["", f"Fel:      {self._errors}", f"Var.:     {self._warnings}", f"Lagrat:   {self._storage.count:,}"])
+            active_errors = len(getattr(self._error_handler, "active_errors", {}))
+            lines.extend([
+                "", f"Fel denna session: {self._errors}", f"Aktiva fel:         {active_errors}",
+                f"Var.:               {self._warnings}", f"Lagrat:             {self._storage.count:,}",
+            ])
         self._view.set_stats_text("\n".join(lines))
 
     def _update_view_alerts(self) -> None:
@@ -927,7 +1006,8 @@ class Plugin:
             "",
             "## Statistik",
             f"- Events: {stats['total_events']} ({stats['events_per_minute']}/min) · lagrade: {stats['storage_count']}",
-            f"- Fel: {stats['errors']} · Varningar: {stats['warnings']} · Intyg: {stats['certificates_generated']}",
+            f"- Fel denna session: {stats['errors']} · Aktiva fel: {stats['active_errors']} · "
+            f"Varningar: {stats['warnings']} · Intyg: {stats['certificates_generated']}",
             "- Nivåer: " + ", ".join(f"{k}={v}" for k, v in sorted(stats['by_level'].items())),
             f"- Alerts: {stats['alerts']} ({stats['unacknowledged_alerts']} obekräftade)",
             "",
@@ -998,6 +1078,7 @@ class Plugin:
         return {
             "total_events": storage_stats.total_events,
             "errors": storage_stats.errors,
+            "active_errors": len(getattr(self._error_handler, "active_errors", {})),
             "warnings": storage_stats.warnings,
             "certificates_generated": self._certificates_generated,
             "events_per_minute": round(storage_stats.get_events_per_minute(), 2),

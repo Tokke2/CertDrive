@@ -1,8 +1,10 @@
 import csv
+import gzip
 import importlib.util
 import json
 import logging
 import sys
+import time
 import tempfile
 import unittest
 from datetime import datetime
@@ -61,6 +63,107 @@ class ErrorSummaryLogTests(unittest.TestCase):
             self.assertIn("failure marker", error_text)
             self.assertNotIn("ordinary information marker", error_text)
             self.assertNotIn("ordinary warning marker", error_text)
+
+    def test_general_log_rollover_compresses_the_previous_day_into_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "archive"
+            logger = logging.getLogger(f"daily-archive-{id(root)}")
+            old_level, old_propagate = logger.level, logger.propagate
+            logger.setLevel(logging.DEBUG)
+            logger.propagate = False
+            handler = create_general_file_handler(
+                root / "app.log", session_id="test-session", archive_dir=archive
+            )
+            logger.addHandler(handler)
+            try:
+                logger.info("previous day archive marker")
+                handler.rolloverAt = int(time.time()) - 1
+                logger.info("new day marker")
+            finally:
+                logger.removeHandler(handler)
+                handler.close()
+                logger.setLevel(old_level)
+                logger.propagate = old_propagate
+
+            archives = list(archive.glob("app.log.*.gz"))
+            self.assertEqual(len(archives), 1)
+            with gzip.open(archives[0], "rt", encoding="utf-8") as stream:
+                self.assertIn("previous day archive marker", stream.read())
+            active = (root / "app.log").read_text(encoding="utf-8")
+            self.assertIn("new day marker", active)
+            self.assertNotIn("previous day archive marker", active)
+
+    def test_active_error_is_persisted_then_marked_resolved_after_same_function_success(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            error_file = Path(temporary) / "errors.log"
+            logger = logging.getLogger(f"error-ledger-{id(error_file)}")
+            old_level, old_propagate = logger.level, logger.propagate
+            logger.setLevel(logging.DEBUG)
+            logger.propagate = False
+            handler = create_error_file_handler(error_file, session_id="test-session")
+            logger.addHandler(handler)
+            try:
+                logger.error("dependency unavailable")
+                self.assertEqual(len(handler.active_errors), 1)
+            finally:
+                logger.removeHandler(handler)
+                handler.close()
+
+            # A new process/handler reloads the active state from errors.log.
+            resumed = create_error_file_handler(error_file, session_id="test-session")
+            self.assertEqual(len(resumed.active_errors), 1)
+            logger.addHandler(resumed)
+            try:
+                logger.info("dependency operation not completed successfully")
+                self.assertEqual(len(resumed.active_errors), 1)
+                logger.info("dependency operation succeeded")
+                self.assertEqual(len(resumed.active_errors), 0)
+            finally:
+                logger.removeHandler(resumed)
+                resumed.close()
+                logger.setLevel(old_level)
+                logger.propagate = old_propagate
+
+            contents = error_file.read_text(encoding="utf-8")
+            self.assertIn("[ERROR OPEN]", contents)
+            self.assertIn("dependency unavailable", contents)
+            self.assertIn("[ERROR RESOLVED]", contents)
+
+    def test_failure_event_resolves_on_its_matching_success_event(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            error_file = Path(temporary) / "errors.log"
+            handler = create_error_file_handler(error_file, session_id="test-session")
+            logger = logging.getLogger(f"event-error-ledger-{id(error_file)}")
+            old_level, old_propagate = logger.level, logger.propagate
+            logger.setLevel(logging.DEBUG)
+            logger.propagate = False
+            logger.addHandler(handler)
+            try:
+                logger.warning(
+                    "[EVENT] certificate.generation_failed",
+                    extra={"_intygsdrive_error_event": True},
+                )
+                self.assertEqual(len(handler.active_errors), 1)
+                logger.info(
+                    "[EVENT] plugin.loaded",
+                    extra={"event": "plugin.loaded"},
+                )
+                self.assertEqual(len(handler.active_errors), 1)
+                logger.info(
+                    "[EVENT] certificate.generated",
+                    extra={"event": "certificate.generated"},
+                )
+                self.assertEqual(len(handler.active_errors), 0)
+            finally:
+                logger.removeHandler(handler)
+                handler.close()
+                logger.setLevel(old_level)
+                logger.propagate = old_propagate
+
+            contents = error_file.read_text(encoding="utf-8")
+            self.assertIn("certificate.generation_failed", contents)
+            self.assertIn("[ERROR RESOLVED]", contents)
 
     def test_collects_errors_and_tagged_failure_events_but_not_plain_warnings(self):
         with tempfile.TemporaryDirectory() as temporary:
