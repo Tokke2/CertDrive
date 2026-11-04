@@ -1,0 +1,134 @@
+"""Safe, user-approved setup helpers for Brother's b-PAC client component."""
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+import struct
+from typing import Any
+
+
+BPAC_DOWNLOAD_URL = (
+    "https://support.brother.com/g/s/es/dev/en/bpac/download/"
+    "index.html?c=eu_ot&lang=en&navi=offall&comple=on&redirect=on"
+)
+_MAX_MSI_BYTES = 100 * 1024 * 1024
+
+
+def application_bitness() -> int:
+    """Return the bitness of the running Python/app process (32 or 64)."""
+    return struct.calcsize("P") * 8
+
+
+def validate_bpac_signature_report(
+    report: dict[str, Any], *, expected_bits: int | None = None
+) -> tuple[bool, str]:
+    """Validate PowerShell's Authenticode and Windows Installer metadata report."""
+    expected_bits = expected_bits or application_bitness()
+    status = str(report.get("Status", ""))
+    subject = str(report.get("Subject", ""))
+    product = str(report.get("Product", ""))
+    template = str(report.get("Template", "")).casefold()
+    if status.casefold() != "valid" or "brother industries" not in subject.casefold():
+        return False, "Installationsfilen saknar en giltig Brother Industries-signatur."
+    if "b-pac" not in product.casefold():
+        return False, "Den signerade MSI-filen verkar inte vara b-PAC Client Component."
+    expected_platform = "x64" if expected_bits == 64 else "intel"
+    if expected_platform not in template:
+        return False, (
+            f"MSI-filen matchar inte appens {expected_bits}-bitarsarkitektur "
+            "(Brother kräver samma bitness)."
+        )
+    return True, f"{product} — Brother Industries, giltig signatur, {expected_bits}-bitars"
+
+
+def verify_bpac_msi(path: Path | str) -> tuple[bool, str]:
+    """Verify an MSI's Authenticode signature is valid and published by Brother."""
+    installer = Path(path)
+    if sys.platform != "win32":
+        return False, "b-PAC kan bara installeras på Windows."
+    if installer.suffix.casefold() != ".msi":
+        return False, "Välj Brothers b-PAC Client Component-installationsfil (.msi)."
+    try:
+        size = installer.stat().st_size
+    except OSError as exc:
+        return False, f"Installationsfilen kunde inte läsas: {exc}"
+    if not installer.is_file() or size < 1024 * 1024 or size > _MAX_MSI_BYTES:
+        return False, "Filen verkar inte vara en giltig b-PAC-klientinstallation."
+
+    powershell = Path(os.environ.get("WINDIR", r"C:\Windows")) / (
+        "System32/WindowsPowerShell/v1.0/powershell.exe"
+    )
+    if not powershell.is_file():
+        return False, "Windows PowerShell saknas; utgivarens signatur kan inte verifieras."
+    # The selected path is inserted as a PowerShell single-quoted literal.
+    # Doubling apostrophes prevents paths from becoming executable syntax.
+    quoted_path = str(installer.resolve()).replace("'", "''")
+    script = f"""
+$p = '{quoted_path}'
+$s = Get-AuthenticodeSignature -LiteralPath $p
+$subject = if ($s.SignerCertificate) {{ $s.SignerCertificate.Subject }} else {{ '' }}
+$wi = New-Object -ComObject WindowsInstaller.Installer
+$db = $wi.OpenDatabase($p, 0)
+$view = $db.OpenView("SELECT `Value` FROM `Property` WHERE `Property`='ProductName'")
+$view.Execute()
+$record = $view.Fetch()
+$product = if ($record) {{ $record.StringData(1) }} else {{ '' }}
+$template = $db.SummaryInformation(0).Property(7)
+[PSCustomObject]@{{ Status = [string]$s.Status; Subject = [string]$subject; Product = [string]$product; Template = [string]$template }} | ConvertTo-Json -Compress
+""".strip()
+    try:
+        result = subprocess.run(
+            [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"Brother-signaturen kunde inte kontrolleras: {exc}"
+    if result.returncode != 0:
+        return False, "Brother-signaturen kunde inte kontrolleras."
+    try:
+        report: dict[str, Any] = json.loads(result.stdout.strip())
+    except (ValueError, TypeError):
+        return False, "Windows returnerade inget giltigt signaturresultat."
+    return validate_bpac_signature_report(report)
+
+
+def launch_bpac_msi_as_admin(path: Path | str) -> tuple[bool, str]:
+    """Run the selected MSI through Windows Installer with an explicit UAC prompt."""
+    if sys.platform != "win32":
+        return False, "b-PAC kan bara installeras på Windows."
+    installer = Path(path).resolve()
+    if installer.suffix.casefold() != ".msi" or not installer.is_file():
+        return False, "Installationsfilen saknas eller är inte en MSI-fil."
+    windows = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    msiexec = windows / "System32" / "msiexec.exe"
+    if not msiexec.is_file():
+        return False, "Windows Installer (msiexec.exe) hittades inte."
+    parameters = f'/i "{installer}" /norestart'
+    try:
+        shell_execute = ctypes.windll.shell32.ShellExecuteW  # type: ignore[attr-defined]
+        shell_execute.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+        ]
+        shell_execute.restype = ctypes.c_void_p
+        result = shell_execute(None, "runas", str(msiexec), parameters, None, 1)
+    except (AttributeError, OSError, ctypes.ArgumentError) as exc:
+        return False, f"Windows-installationen kunde inte startas: {exc}"
+    result_code = int(result or 0)
+    if result_code <= 32:
+        if result_code == 1223:
+            return False, "Installationen avbröts vid UAC-frågan."
+        return False, f"Windows kunde inte starta installationsprogrammet (kod {result_code})."
+    return True, "Windows Installer startades med administratörsgodkännande."

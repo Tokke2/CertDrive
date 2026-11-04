@@ -2143,6 +2143,8 @@ class Application:
              plugins=len(plugin_names))
         # 10.8.0: erbjud installation av saknade tillägg när UI är redo.
         QTimer.singleShot(400, self._show_dependency_offer)
+        # b-PAC erbjuds separat eftersom Brother kräver EULA-acceptans och UAC.
+        QTimer.singleShot(1600, self._offer_bpac_install_at_startup)
         # Kontrollera vid start och därefter var tolfte timme (två gånger per dygn).
         QTimer.singleShot(5000, self._start_release_check)
         if self._update_timer is None:
@@ -2452,6 +2454,14 @@ class Application:
             ),
             None,
         )
+
+    def _offer_bpac_install_at_startup(self) -> None:
+        if self.window is None or self._exit_requested:
+            return
+        plugin = self._certificate_plugin_for_menu()
+        action = getattr(plugin, "offer_bpac_setup_at_startup", None)
+        if callable(action):
+            action(self.window)
 
     def _manage_certificate_number(self) -> None:
         plugin = self._certificate_plugin_for_menu()

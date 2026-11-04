@@ -41,8 +41,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, QSize, Signal, Slot
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, QUrl, Qt, QSize, Signal, Slot
+from PySide6.QtGui import QDesktopServices, QDragEnterEvent, QDropEvent, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QInputDialog,
     QApplication,
@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import labels as _labels
+from . import bpac_setup as _bpac_setup
 from .counter_security import CounterPinStore
 from .customers import Customer, load_customers, save_customers
 from .history import find_duplicate_certificates, registration_from_values
@@ -487,6 +488,7 @@ class Plugin:
         self._templates_lock = threading.RLock()
         self._templates: dict[str, Any] = {}
         self._loaded = False
+        self._bpac_setup_prompted = False
         self._scan_active = False
         self._scan_requested = False
         self._scan_token = 0
@@ -2467,6 +2469,110 @@ class Plugin:
             self._start_label_print(mapped_label, 1, dict(self._last_values))
         elif label_button is not None and clicked is label_button:
             self._print_label_dialog(template_name=template_name)
+
+    def offer_bpac_setup_at_startup(self, parent: QWidget | None = None) -> None:
+        """Offer an approved, signature-verified b-PAC install at application startup."""
+        if self._bpac_setup_prompted:
+            return
+        self._bpac_setup_prompted = True
+        if sys.platform != "win32" or _labels.bpac_available():
+            return
+        label_folder = _labels.label_folder(self.templates_path)
+        if not _labels.find_labels(label_folder):
+            return
+
+        parent = parent or self._tab_widget
+        bits = _bpac_setup.application_bitness()
+        prompt = QMessageBox(parent)
+        prompt.setIcon(QMessageBox.Icon.Information)
+        prompt.setWindowTitle("Brother b-PAC saknas")
+        prompt.setText("Etikettmallar finns, men b-PAC Client Component är inte installerad.")
+        prompt.setInformativeText(
+            f"Appen behöver Brother b-PAC {bits}-bitars för att kunna skriva ut .lbx-etiketter. "
+            "Vill du hämta och installera Brother-komponenten nu?"
+        )
+        install_button = prompt.addButton(
+            "Hämta och installera…", QMessageBox.ButtonRole.AcceptRole
+        )
+        prompt.addButton("Inte nu", QMessageBox.ButtonRole.RejectRole)
+        prompt.setDefaultButton(install_button)
+        prompt.exec()
+        if prompt.clickedButton() is not install_button:
+            self._evt("label.bpac_setup_deferred", "b-PAC-installation sköts upp",
+                      level=logging.INFO, bitness=bits)
+            return
+
+        if not QDesktopServices.openUrl(QUrl(_bpac_setup.BPAC_DOWNLOAD_URL)):
+            QMessageBox.warning(
+                parent,
+                "Brother-sidan kunde inte öppnas",
+                "Öppna Brothers officiella b-PAC-sida manuellt och ladda ner "
+                "Client Component i rätt bitness.",
+            )
+            return
+        info = QMessageBox(parent)
+        info.setWindowTitle("Hämta b-PAC från Brother")
+        info.setText("Godkänn Brothers licens och hämta b-PAC Client Component.")
+        info.setInformativeText(
+            f"Välj {bits}-bitars Client Component (inte utvecklar-SDK:t). "
+            "När MSI-filen har hämtats väljer du den här. Appen kontrollerar "
+            "Brother-signaturen och MSI-arkitekturen innan Windows-installationen startas."
+        )
+        info.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        if info.exec() != QMessageBox.StandardButton.Ok:
+            return
+
+        installer_path, _selected_filter = QFileDialog.getOpenFileName(
+            parent,
+            "Välj hämtad Brother b-PAC Client Component",
+            str(Path.home() / "Downloads"),
+            "Windows Installer (*.msi)",
+        )
+        if not installer_path:
+            return
+        verified, verification_message = _bpac_setup.verify_bpac_msi(installer_path)
+        if not verified:
+            self._evt("label.bpac_installer_rejected", "b-PAC-installationsfilen avvisades",
+                      level=logging.WARNING, reason=verification_message)
+            QMessageBox.warning(parent, "Installationsfilen avvisades", verification_message)
+            return
+
+        confirm = QMessageBox(parent)
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setWindowTitle("Bekräfta b-PAC-installation")
+        confirm.setText("Brother-signaturen och appens bitness är verifierade.")
+        confirm.setInformativeText(
+            f"{verification_message}\n\nWindows kommer att fråga om "
+            "administratörsgodkännande innan installationen startar."
+        )
+        start_button = confirm.addButton(
+            "Starta installation", QMessageBox.ButtonRole.AcceptRole
+        )
+        confirm.addButton("Avbryt", QMessageBox.ButtonRole.RejectRole)
+        confirm.setDefaultButton(start_button)
+        confirm.exec()
+        if confirm.clickedButton() is not start_button:
+            return
+
+        launched, message = _bpac_setup.launch_bpac_msi_as_admin(installer_path)
+        if not launched:
+            self._evt("label.bpac_installer_start_failed", "b-PAC-installationen startade inte",
+                      level=logging.WARNING, reason=message)
+            QMessageBox.warning(parent, "Installationen startade inte", message)
+            return
+        self._evt(
+            "label.bpac_installer_started",
+            "Brother b-PAC Client Component startades med UAC-godkännande",
+            level=logging.INFO,
+            installer=Path(installer_path).name,
+            bitness=bits,
+        )
+        QMessageBox.information(
+            parent,
+            "b-PAC-installationen startad",
+            "Slutför Windows-installationen. Starta sedan om IntygsDrive "
+            "för att aktivera b-PAC-utskriften.",
+        )
 
     # ── Etikettutskrift (QL-500 via b-PAC) ────────────────────────────────
 
