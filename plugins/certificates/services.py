@@ -694,6 +694,20 @@ class CounterManager:
             self._values[str(name)] = max(0, int(value))
             self._save_locked()
 
+    def set_next(self, name: str, next_number: int, start: int = 1) -> int:
+        """Set the next generated number (not the last-used counter value)."""
+        if isinstance(next_number, bool):
+            raise ValueError("Nästa intygsnummer måste vara ett heltal")
+        try:
+            requested = int(next_number)
+            minimum = max(1, int(start))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Nästa intygsnummer måste vara ett giltigt heltal") from exc
+        if requested < minimum:
+            raise ValueError(f"Nästa intygsnummer måste vara minst {minimum}")
+        self.set(name, requested - 1)
+        return requested
+
     def reset(self, name: str) -> None:
         self.set(name, 0)
 

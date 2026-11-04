@@ -140,7 +140,12 @@ def print_label(
         if not document.Open(str(label_path)):
             raise RuntimeError(f"b-PAC kunde inte öppna {name} (felkod {document.ErrorCode})")
         if printer_name:
-            document.SetPrinter(printer_name, True)
+            printer_result = document.SetPrinter(printer_name, True)
+            if printer_result is not None and not bool(printer_result):
+                error_code = getattr(document, "ErrorCode", "okänd")
+                raise RuntimeError(
+                    f"b-PAC kunde inte välja skrivaren {printer_name} (felkod {error_code})"
+                )
         if calibration:
             text_count = int(document.GetTextCount())
             if text_count <= 0:
@@ -160,10 +165,18 @@ def print_label(
                 if obj is not None:
                     obj.Text = str(value)
                     filled.append(str(key))
-        document.StartPrint(label_path.stem, _BPAC_PRINT_DEFAULT)
-        document.PrintOut(copies, _BPAC_PRINT_DEFAULT)
-        if not document.EndPrint():
-            raise RuntimeError(f"Utskriften misslyckades (b-PAC felkod {document.ErrorCode})")
+        start_result = document.StartPrint(label_path.stem, _BPAC_PRINT_DEFAULT)
+        if start_result is not None and not bool(start_result):
+            error_code = getattr(document, "ErrorCode", "okänd")
+            raise RuntimeError(f"b-PAC kunde inte starta utskriften (felkod {error_code})")
+        print_result = document.PrintOut(copies, _BPAC_PRINT_DEFAULT)
+        end_result = document.EndPrint()
+        if print_result is not None and not bool(print_result):
+            error_code = getattr(document, "ErrorCode", "okänd")
+            raise RuntimeError(f"b-PAC kunde inte skicka jobbet till skrivaren (felkod {error_code})")
+        if end_result is not None and not bool(end_result):
+            error_code = getattr(document, "ErrorCode", "okänd")
+            raise RuntimeError(f"b-PAC avslutade utskriften med fel (felkod {error_code})")
         return LabelResult(True, name, copies, filled, duration=time.perf_counter() - started)
     except Exception as exc:
         _logger.exception("[LABEL] Utskrift av %s misslyckades", name)

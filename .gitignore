@@ -1,3 +1,6 @@
+# Local administrative PIN hash (user-specific; never commit)
+/js/certificate_number_pin.json
+
 # Local automatic-updater state and payloads
 /js/update_state.json
 /js/update-helper.log

@@ -977,6 +977,19 @@ class MainWindow(QMainWindow):
             "SP_BrowserReload",
             lambda: self._app._start_release_check(manual=True),
         )
+        tools_menu.addSeparator()
+        self._add_action(
+            tools_menu,
+            "Ändra nästa intygsnummer…",
+            "SP_FileDialogContentsView",
+            self._app._manage_certificate_number,
+        )
+        self._add_action(
+            tools_menu,
+            "Ställ in/ändra PIN för intygsnummer…",
+            "SP_DialogPasswordIcon",
+            self._app._configure_certificate_number_pin,
+        )
 
         help_menu = bar.addMenu("&Hjälp")
         self._add_action(
@@ -2143,6 +2156,8 @@ class Application:
         if not manual and not bool(self.config_value("app.check_updates", True)):
             _evt("update.check_skipped", "Automatisk releasekontroll är avstängd")
             return
+        if manual and self.window is not None:
+            self.window.status_signal.emit("Söker efter uppdateringar på GitHub…")
         if self._update_thread is not None and self._update_thread.is_alive():
             if manual and self.window is not None:
                 self.window.status_signal.emit("En uppdateringskontroll pågår redan.")
@@ -2196,13 +2211,17 @@ class Application:
                     if manual else "⚠ Automatisk uppdatering misslyckades; försöker igen senare."
                 )
                 self.window.status_signal.emit(message)
+                if manual:
+                    QMessageBox.warning(self.window, "Uppdateringssökning", message)
             return
         release = result.get("release")
         if release is None:
             _evt("update.current", "Ingen nyare GitHub Release hittades",
                  level=logging.DEBUG, version=APP_VERSION, manual=manual)
             if manual and self.window is not None and not self._exit_requested:
-                self.window.status_signal.emit(f"✅ IntygsDrive {APP_VERSION} är aktuell.")
+                message = f"IntygsDrive {APP_VERSION} är aktuell."
+                self.window.status_signal.emit(f"✅ {message}")
+                QMessageBox.information(self.window, "Uppdateringssökning", message)
             return
 
         staged = result.get("staged")
@@ -2213,19 +2232,24 @@ class Application:
                  level=logging.DEBUG, version=release.version, commit=release.commit_sha,
                  manual=manual)
             if manual and self.window is not None and not self._exit_requested:
-                self.window.status_signal.emit(
-                    f"✅ Appfilerna är redan uppdaterade ({release.version}, "
+                message = (
+                    f"Appfilerna är redan uppdaterade ({release.version}, "
                     f"{release.commit_sha[:7]})."
                 )
+                self.window.status_signal.emit(f"✅ {message}")
+                QMessageBox.information(self.window, "Uppdateringssökning", message)
             return
 
         _evt("update.staged", "Nyare appkod hämtad och väntar på att appen stängs",
              version=release.version, commit=release.commit_sha, manual=manual)
         if self.window is not None and not self._exit_requested:
-            self.window.status_signal.emit(
-                f"⬇ Ny appkod ({release.version}, commit {release.commit_sha[:7]}) hämtad — "
-                "installeras automatiskt när appen stängs."
+            message = (
+                f"Ny appkod ({release.version}, commit {release.commit_sha[:7]}) är hämtad. "
+                "Den installeras när appen stängs och startas sedan om automatiskt."
             )
+            self.window.status_signal.emit(f"⬇ {message}")
+            if manual:
+                QMessageBox.information(self.window, "Uppdatering hämtad", message)
 
     def _log_startup_summary(self) -> None:
         """10.10.0: synlig startup-självdiagnos.
@@ -2363,6 +2387,51 @@ class Application:
 
     def _on_update_check_requested(self, _data: Any = None) -> None:
         QTimer.singleShot(0, lambda: self._start_release_check(manual=True))
+
+    def _certificate_plugin_for_menu(self) -> Any | None:
+        manager = self.plugin_manager
+        if manager is None:
+            return None
+        getter = getattr(manager, "get_plugin", None)
+        if callable(getter):
+            for name in ("Intyg", "certificates"):
+                try:
+                    plugin = getter(name)
+                except Exception:
+                    plugin = None
+                if plugin is not None:
+                    return plugin
+        return next(
+            (
+                plugin for plugin in getattr(manager, "loaded", {}).values()
+                if hasattr(plugin, "manage_next_certificate_number")
+            ),
+            None,
+        )
+
+    def _manage_certificate_number(self) -> None:
+        plugin = self._certificate_plugin_for_menu()
+        action = getattr(plugin, "manage_next_certificate_number", None)
+        if callable(action):
+            action(self.window)
+            return
+        QMessageBox.information(
+            self.window,
+            "Intygsräknare",
+            "Intygspluginet är inte tillgängligt ännu. Försök igen när appen har läst in mallarna.",
+        )
+
+    def _configure_certificate_number_pin(self) -> None:
+        plugin = self._certificate_plugin_for_menu()
+        action = getattr(plugin, "manage_counter_pin", None)
+        if callable(action):
+            action(self.window)
+            return
+        QMessageBox.information(
+            self.window,
+            "PIN för intygsnummer",
+            "Intygspluginet är inte tillgängligt ännu. Försök igen när appen har lästs in.",
+        )
 
     def _collect_support_diagnostics(self) -> dict[str, Any]:
         manager = self.plugin_manager

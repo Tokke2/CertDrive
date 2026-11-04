@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import labels as _labels
+from .counter_security import CounterPinStore
 from .customers import Customer, load_customers, save_customers
 from .history import find_duplicate_certificates, registration_from_values
 from .label_mappings import load_label_mappings, save_label_mappings
@@ -786,6 +787,146 @@ class Plugin:
             )
         except TypeError:
             self._counter_manager = _CounterManager(config_path=counter_path)
+
+    def _verify_counter_pin(self, store: CounterPinStore, parent: QWidget | None) -> bool:
+        for attempt in range(3):
+            pin, accepted = QInputDialog.getText(
+                parent,
+                "PIN för intygsnummer",
+                f"Ange PIN-koden ({attempt + 1}/3):",
+                QLineEdit.EchoMode.Password,
+            )
+            if not accepted:
+                return False
+            if store.verify(pin):
+                return True
+            QMessageBox.warning(parent, "Fel PIN", "PIN-koden stämmer inte.")
+        return False
+
+    def manage_counter_pin(self, parent: QWidget | None = None) -> None:
+        """Set or change the local PIN required for changing certificate numbers."""
+        if self.config_path is None:
+            QMessageBox.warning(parent, "PIN saknas", "Appens konfigurationsmapp är inte tillgänglig.")
+            return
+        store = CounterPinStore(self.config_path / "certificate_number_pin.json")
+        if store.configured and not self._verify_counter_pin(store, parent):
+            return
+        first, accepted = QInputDialog.getText(
+            parent,
+            "Ställ in PIN för intygsnummer",
+            "Välj en PIN med 4–12 siffror:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not accepted:
+            return
+        if not store.validate(first):
+            QMessageBox.warning(parent, "Ogiltig PIN", "PIN-koden måste bestå av 4–12 siffror.")
+            return
+        confirmation, accepted = QInputDialog.getText(
+            parent,
+            "Bekräfta PIN",
+            "Ange samma PIN en gång till:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not accepted:
+            return
+        if first != confirmation:
+            QMessageBox.warning(parent, "PIN stämmer inte", "De två PIN-koderna är olika.")
+            return
+        try:
+            store.set_pin(first)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(parent, "PIN kunde inte sparas", str(exc))
+            return
+        QMessageBox.information(parent, "PIN sparad", "PIN-skyddet för intygsnummer är aktiverat.")
+        self._evt("counter.pin_configured", "PIN-skydd för intygsnummer har uppdaterats")
+
+    def manage_next_certificate_number(self, parent: QWidget | None = None) -> None:
+        """PIN-gated menu action for setting the next per-template certificate number."""
+        if self.config_path is None or self._counter_manager is None:
+            QMessageBox.warning(parent, "Räknare saknas", "Intygsräknaren är inte tillgänglig ännu.")
+            return
+        store = CounterPinStore(self.config_path / "certificate_number_pin.json")
+        if not store.configured:
+            QMessageBox.information(
+                parent,
+                "PIN krävs",
+                "Ställ först in PIN-koden via Verktyg → Ställ in/ändra PIN för intygsnummer.",
+            )
+            return
+        if not self._verify_counter_pin(store, parent):
+            return
+
+        names = sorted(
+            {str(name) for name in self._templates}
+            | {str(name) for name in self._counter_manager.get_all()},
+            key=str.casefold,
+        )
+        if not names:
+            QMessageBox.information(parent, "Inga mallar", "Läs in en intygsmall först.")
+            return
+        selected_name = self._last_selected_name
+        current_index = names.index(selected_name) if selected_name in names else 0
+        template_name, accepted = QInputDialog.getItem(
+            parent,
+            "Ändra nästa intygsnummer",
+            "Välj vilken intygsmall räknaren ska ändras för:",
+            names,
+            current_index,
+            False,
+        )
+        if not accepted:
+            return
+        template = self._templates.get(template_name)
+        config = _safe_get(template, "config", None)
+        try:
+            start = max(1, int(_safe_get(config, "counter_start", 1)))
+        except (TypeError, ValueError):
+            start = 1
+        try:
+            current_next = self._counter_manager.get_next(template_name, start=start)
+        except Exception:
+            current_next = start
+        next_number, accepted = QInputDialog.getInt(
+            parent,
+            "Ändra nästa intygsnummer",
+            f"Nästa nummer för {template_name}:",
+            current_next,
+            start,
+            2_147_483_647,
+        )
+        if not accepted:
+            return
+        answer = QMessageBox.question(
+            parent,
+            "Bekräfta nummerändring",
+            f"Nästa intyg med mallen {template_name} får nummer {next_number}.\n\n"
+            "Ett redan använt nummer kan skapa dubbletter. Vill du fortsätta?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._counter_manager.set_next(template_name, next_number, start=start)
+            if self._counter_manager.get_next(template_name, start=start) != next_number:
+                raise OSError("Räknaren kunde inte verifiera det sparade numret.")
+        except (OSError, TypeError, ValueError) as exc:
+            QMessageBox.warning(parent, "Numret kunde inte sparas", str(exc))
+            return
+        if template is not None:
+            self._update_counter_label(template)
+        self._evt(
+            "counter.next_number_changed",
+            "Nästa intygsnummer ändrades via PIN-skyddad meny",
+            template=template_name,
+            next_number=next_number,
+        )
+        QMessageBox.information(
+            parent,
+            "Intygsnummer ändrat",
+            f"Nästa intyg med mallen {template_name} får nummer {next_number}.",
+        )
 
     def _start_converter_probe(self) -> None:
         if self.output_path is None or self._counter_manager is None:
