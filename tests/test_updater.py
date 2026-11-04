@@ -10,8 +10,11 @@ from core import APP_DISPLAY_NAME, __version__ as app_version
 from core.updater import (
     ReleaseUpdate,
     _version_key,
+    approve_staged_update,
     check_latest_release,
+    discard_staged_update,
     get_current_commit,
+    launch_pending_update_helper,
     run_update_helper,
     stage_release_archive,
     UPDATE_INTERVAL_HOURS,
@@ -123,6 +126,9 @@ class AutomaticUpdateStagingTests(unittest.TestCase):
             staged = stage_release_archive(root, release, archive)
             self.assertTrue(staged.staged)
             with patch("core.updater.subprocess.Popen") as restart:
+                self.assertFalse(run_update_helper(root, -12345, wait_timeout=0.01))
+                restart.assert_not_called()
+                self.assertTrue(approve_staged_update(root, release))
                 self.assertTrue(run_update_helper(root, -12345, wait_timeout=0.01))
             restart.assert_called_once()
             command = restart.call_args.args[0]
@@ -136,6 +142,39 @@ class AutomaticUpdateStagingTests(unittest.TestCase):
             self.assertEqual((root / "Mallar" / "kund.docx").read_bytes(), b"user template")
             self.assertEqual(get_current_commit(root), "a" * 40)
             self.assertFalse((root / "js" / ".update-staging").exists())
+
+    def test_declining_update_discards_it_and_never_installs_on_shutdown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "core").mkdir()
+            (root / "js").mkdir()
+            (root / "main.pyw").write_text("old main", encoding="utf-8")
+            release = ReleaseUpdate("v0.0.1", "IntygsDrive 0.0.1", "", "", "d" * 40)
+            stage_release_archive(root, release, _zipball({"main.pyw": b"new main"}))
+
+            with patch("core.updater.subprocess.Popen") as restart:
+                self.assertFalse(run_update_helper(root, -12345, wait_timeout=0.01))
+                self.assertTrue(discard_staged_update(root, release))
+                self.assertFalse(run_update_helper(root, -12345, wait_timeout=0.01))
+            restart.assert_not_called()
+            self.assertEqual((root / "main.pyw").read_text(encoding="utf-8"), "old main")
+            self.assertFalse((root / "js" / ".update-staging" / "pending.json").exists())
+
+    def test_shutdown_helper_is_launched_only_after_explicit_approval(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "core").mkdir()
+            (root / "js").mkdir()
+            (root / "main.pyw").write_text("old main", encoding="utf-8")
+            release = ReleaseUpdate("v0.0.1", "IntygsDrive 0.0.1", "", "", "c" * 40)
+            stage_release_archive(root, release, _zipball({"main.pyw": b"new main"}))
+
+            with patch("core.updater.subprocess.Popen") as launch:
+                self.assertFalse(launch_pending_update_helper(root, 123))
+                launch.assert_not_called()
+                self.assertTrue(approve_staged_update(root, release))
+                self.assertTrue(launch_pending_update_helper(root, 123))
+                launch.assert_called_once()
 
     def test_same_commit_with_local_file_drift_stages_release_contents(self):
         with tempfile.TemporaryDirectory() as temp:

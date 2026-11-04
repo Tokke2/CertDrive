@@ -31,6 +31,7 @@ UPDATE_INTERVAL_HOURS = 12
 _STAGING_NAME = ".update-staging"
 _STATE_NAME = "update_state.json"
 _PENDING_NAME = "pending.json"
+_APPROVED_NAME = "approved.json"
 _RUNTIME_DIRS = frozenset({"core", "plugins", "Icon"})
 _RUNTIME_ROOT_FILES = frozenset({"main.pyw", "main_guards.py"})
 _RUNTIME_SUFFIXES = frozenset({".py", ".pyw", ".svg", ".png", ".ico"})
@@ -273,14 +274,17 @@ def stage_release_archive(
 
     staging_root = app_root / "js" / _STAGING_NAME
     pending_path = staging_root / _PENDING_NAME
+    approval_path = staging_root / _APPROVED_NAME
     if current:
         _record_installed_commit(app_root, release)
         pending_path.unlink(missing_ok=True)
+        approval_path.unlink(missing_ok=True)
         for child in staging_root.iterdir() if staging_root.is_dir() else ():
             if child.name != _PENDING_NAME:
                 shutil.rmtree(child, ignore_errors=True) if child.is_dir() else child.unlink(missing_ok=True)
         return UpdateStageResult(False, release.commit_sha, release.version, "already-current")
 
+    approval_path.unlink(missing_ok=True)
     stage_dir = staging_root / release.commit_sha
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
@@ -348,10 +352,51 @@ def _read_pending_update(root: Path) -> tuple[Path, ReleaseUpdate] | None:
     return None
 
 
-def launch_pending_update_helper(root: Path | str, parent_pid: int) -> bool:
-    """Start a detached, quiet helper that installs staged files after shutdown."""
+def _is_update_approved(root: Path, release: ReleaseUpdate) -> bool:
+    approval_path = root / "js" / _STAGING_NAME / _APPROVED_NAME
+    try:
+        data = json.loads(approval_path.read_text(encoding="utf-8"))
+        return str(data.get("commit_sha", "")).lower() == release.commit_sha
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def approve_staged_update(root: Path | str, release: ReleaseUpdate) -> bool:
+    """Record explicit user consent for installing this exact staged commit."""
     app_root = Path(root).resolve()
-    if getattr(sys, "frozen", False) or _read_pending_update(app_root) is None:
+    pending = _read_pending_update(app_root)
+    if pending is None or pending[1].commit_sha != release.commit_sha:
+        return False
+    _write_json_atomic(
+        app_root / "js" / _STAGING_NAME / _APPROVED_NAME,
+        {
+            "commit_sha": release.commit_sha,
+            "approved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        },
+    )
+    return True
+
+
+def discard_staged_update(root: Path | str, release: ReleaseUpdate) -> bool:
+    """Discard a staged commit after the user declines its installation."""
+    app_root = Path(root).resolve()
+    pending = _read_pending_update(app_root)
+    if pending is None or pending[1].commit_sha != release.commit_sha:
+        return False
+    staging_root = app_root / "js" / _STAGING_NAME
+    shutil.rmtree(staging_root / release.commit_sha, ignore_errors=True)
+    (staging_root / _PENDING_NAME).unlink(missing_ok=True)
+    (staging_root / _APPROVED_NAME).unlink(missing_ok=True)
+    return True
+
+
+def launch_pending_update_helper(root: Path | str, parent_pid: int) -> bool:
+    """Start a detached helper only after the user approved the staged update."""
+    app_root = Path(root).resolve()
+    pending = _read_pending_update(app_root)
+    if getattr(sys, "frozen", False) or pending is None:
+        return False
+    if not _is_update_approved(app_root, pending[1]):
         return False
     helper_code = (
         "import sys; from pathlib import Path; "
@@ -431,8 +476,11 @@ def _restart_updated_app(root: Path) -> bool:
 
 
 def run_update_helper(root: Path | str, parent_pid: int, *, wait_timeout: float = 48 * 60 * 60) -> bool:
-    """Wait for the app to close, apply the staged update, then restart it."""
+    """Wait for the app to close, apply an explicitly approved update, then restart it."""
     app_root = Path(root).resolve()
+    initial_pending = _read_pending_update(app_root)
+    if initial_pending is None or not _is_update_approved(app_root, initial_pending[1]):
+        return False
     deadline = time.monotonic() + max(1.0, wait_timeout)
     while _pid_is_running(int(parent_pid)) and time.monotonic() < deadline:
         time.sleep(0.5)
@@ -441,7 +489,7 @@ def run_update_helper(root: Path | str, parent_pid: int, *, wait_timeout: float 
         return False
 
     pending = _read_pending_update(app_root)
-    if pending is None:
+    if pending is None or not _is_update_approved(app_root, pending[1]):
         return False
     files_dir, release = pending
     changes: list[tuple[Path, Path | None]] = []

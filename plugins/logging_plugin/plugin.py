@@ -1145,7 +1145,10 @@ class Plugin:
         with self._alerts_lock:
             alerts = len(self._alerts)
             unacknowledged = sum(not bool(alert["acknowledged"]) for alert in self._alerts)
-        fs_summary = self._view.fs_view.get_summary() if self._view is not None else {}
+        fs_summary: dict[str, Any] = {}
+        if self._tracer is not None:
+            with contextlib.suppress(Exception):
+                fs_summary = self._tracer.stats()
         archived_files = 0
         if self.archive_dir is not None and self.archive_dir.is_dir():
             with contextlib.suppress(OSError):

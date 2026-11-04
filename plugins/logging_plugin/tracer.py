@@ -270,6 +270,9 @@ class FileSystemTracer:
         low = path_s.lower()
         if not low:
             return True
+        normalized = low.replace("\\", "/")
+        if "/js/.update-staging" in normalized:
+            return True
         if "__pycache__" in low or "site-packages" in low:
             return True
         if self._logs_prefix and low.startswith(self._logs_prefix):

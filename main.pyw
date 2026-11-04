@@ -428,7 +428,9 @@ try:
         PluginManager,
     )
     from core.updater import (
+        approve_staged_update,
         check_latest_release,
+        discard_staged_update,
         get_current_commit,
         launch_pending_update_helper,
         stage_release_update,
@@ -2240,16 +2242,58 @@ class Application:
                 QMessageBox.information(self.window, "Uppdateringssökning", message)
             return
 
-        _evt("update.staged", "Nyare appkod hämtad och väntar på att appen stängs",
+        _evt("update.staged", "Nyare appkod hämtad och väntar på användarens val",
              version=release.version, commit=release.commit_sha, manual=manual)
-        if self.window is not None and not self._exit_requested:
-            message = (
-                f"Ny appkod ({release.version}, commit {release.commit_sha[:7]}) är hämtad. "
-                "Den installeras när appen stängs och startas sedan om automatiskt."
-            )
-            self.window.status_signal.emit(f"⬇ {message}")
-            if manual:
-                QMessageBox.information(self.window, "Uppdatering hämtad", message)
+        if self.window is None or self._exit_requested:
+            return
+
+        box = QMessageBox(self.window)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Uppdatering tillgänglig")
+        box.setText(f"En uppdatering av IntygsDrive {release.version} har hämtats.")
+        box.setInformativeText(
+            "Vill du installera den nu? Appen avslutas, uppdateras och startas om automatiskt. "
+            "Väljer du ‘Inte nu’ installeras den inte vid senare avstängning."
+        )
+        install_button = box.addButton(
+            "Installera och starta om", QMessageBox.ButtonRole.AcceptRole
+        )
+        later_button = box.addButton("Inte nu", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(install_button)
+        box.setEscapeButton(later_button)
+        box.exec()
+
+        if box.clickedButton() is install_button:
+            try:
+                approved = approve_staged_update(APP_PATH, release)
+            except Exception as exc:
+                approved = False
+                _evt("update.approval_failed", "Kunde inte godkänna uppdateringen",
+                     level=logging.ERROR, error=f"{type(exc).__name__}: {exc}")
+            if not approved:
+                QMessageBox.warning(
+                    self.window,
+                    "Uppdatering kunde inte startas",
+                    "Uppdateringen kunde inte godkännas. Ingen installation har startats.",
+                )
+                return
+            _evt("update.approved", "Användaren godkände installation och omstart",
+                 version=release.version, commit=release.commit_sha)
+            self.window.status_signal.emit("⬇ Uppdateringen installeras och appen startas om …")
+            self.exit()
+            return
+
+        try:
+            discarded = discard_staged_update(APP_PATH, release)
+        except Exception as exc:
+            discarded = False
+            _evt("update.discard_failed", "Kunde inte rensa avböjd uppdatering",
+                 level=logging.WARNING, error=f"{type(exc).__name__}: {exc}")
+        _evt("update.declined", "Användaren valde att inte installera uppdateringen",
+             version=release.version, commit=release.commit_sha, discarded=discarded)
+        self.window.status_signal.emit(
+            "Uppdateringen installeras inte. Du kan söka efter den igen senare."
+        )
 
     def _log_startup_summary(self) -> None:
         """10.10.0: synlig startup-självdiagnos.
