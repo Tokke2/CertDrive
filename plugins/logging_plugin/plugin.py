@@ -10,8 +10,8 @@ Intygsgenerator — central logging-controller. Skriver all loggning till app.lo
 och speglar fel till errors.log; behåller crash hooks, EventBus och Logger UI.
 
 Logglayout: <app>/logs/logging/app.log innehåller alla nivåer och roteras vid midnatt
-till archive/. errors.log är en separat fellogg med öppna/åtgärdade markeringar; den
-arkiveras inte bort. Äldre loggerfiler flyttas säkert till den nya mappen vid uppstart.
+till archive/. Dagsarkiv och åtgärdad felhistorik gallras efter 21 dagar; aktiva fel
+behålls utan tidsgräns i errors.log. Äldre loggerfiler flyttas säkert vid uppstart.
 """
 
 import atexit
@@ -41,6 +41,7 @@ from .core import (
     COPYRIGHT,
     SESSION_ID as CORE_SESSION_ID,
     ColorFormatter,
+    archive_old_logs,
     create_error_file_handler,
     create_general_file_handler,
     exception_details,
@@ -68,7 +69,8 @@ PLUGIN_PRIORITY: int = 1
 _TRACKED_EVENTS: Final[tuple[str, ...]] = (
     "certificate.before_generate", "certificate.generated", "certificate.generation_failed",
     "certificate.template_selected", "certificate.placeholder_updated", "certificates.imported",
-    "certificates.batch.started", "certificates.batch.completed", "templates.scanned",
+    "certificates.batch.started", "certificates.batch.completed", "certificates.batch.failed",
+    "templates.scanned",
     "refresh_templates", "template.created", "template.deleted", "template.updated",
     "statistics.certificate_generated", "statistics.updated", "statistics.response",
     "settings.changed", "settings.theme_changed", "tray.status_update", "tray.minimize",
@@ -181,6 +183,8 @@ class Plugin:
         self._view: LoggerView | None = None
         self._fs_timer: QTimer | None = None
         self._heartbeat_timer: QTimer | None = None
+        self._maintenance_timer: QTimer | None = None
+        self._maintenance_day = datetime.now().date()
 
         self._alerts: deque[dict[str, Any]] = deque(maxlen=200)
         self._alert_counter = 0
@@ -207,7 +211,9 @@ class Plugin:
             ("sökvägar", self._setup_paths),
             ("migrera äldre loggar", self._migrate_legacy_logs),
             ("arkivera tidigare dagar", self._archive_previous_days),
+            ("gallra gamla arkiv", self._prune_old_archives),
             ("logging", self._setup_logging),
+            ("midnattsunderhåll", self._start_daily_maintenance),
             ("filsystem-spårning", self._setup_tracer),
             ("bakgrundsköer", self._start_background_threads),
             ("crashhanterare", self._install_crash_handlers),
@@ -278,6 +284,11 @@ class Plugin:
         if self._heartbeat_timer is not None:
             with contextlib.suppress(Exception):
                 self._heartbeat_timer.stop()
+        if self._maintenance_timer is not None:
+            with contextlib.suppress(Exception):
+                self._maintenance_timer.stop()
+            self._maintenance_timer.deleteLater()
+            self._maintenance_timer = None
         self._context = None
         self._event_bus = None
 
@@ -537,6 +548,38 @@ class Plugin:
             # Keep app.log intact if any archive or rewrite operation fails.
             _logger.exception("[LOGGING] Kunde inte arkivera föregående dagsloggar")
 
+    def _prune_old_archives(self) -> None:
+        if self.log_dir is not None:
+            archive_old_logs(self.log_dir)
+
+    def _start_daily_maintenance(self) -> None:
+        """Check the midnight rollover promptly even if the app is otherwise idle."""
+        if self._maintenance_timer is not None:
+            self._maintenance_timer.stop()
+        self._maintenance_day = datetime.now().date()
+        self._maintenance_timer = QTimer()
+        self._maintenance_timer.setInterval(15_000)
+        self._maintenance_timer.timeout.connect(self._run_daily_maintenance)
+        self._maintenance_timer.start()
+
+    def _run_daily_maintenance(self) -> None:
+        try:
+            today = datetime.now().date()
+            day_changed = today != self._maintenance_day
+            rollover = getattr(self._general_handler, "rollover_if_due", None)
+            if callable(rollover):
+                rollover(force=day_changed)
+            if not day_changed:
+                return
+            self._maintenance_day = today
+            self._prune_old_archives()
+            prune_errors = getattr(self._error_handler, "prune_resolved", None)
+            if callable(prune_errors):
+                prune_errors()
+            self._signals.stats_updated.emit()
+        except Exception:
+            _logger.exception("[LOGGING] Midnattsunderhåll misslyckades")
+
     def _setup_logging(self) -> None:
         logger = logging.getLogger("Intygsgenerator")
         logger.setLevel(logging.DEBUG)
@@ -735,15 +778,22 @@ class Plugin:
                     value = str(data[key])
                     parts.append(f"{key}={value[:60]!r}")
         message = f"[EVENT] {event_name}" + (f"\n  ↳ {', '.join(parts)}" if parts else "")
-        if any(token in event_name.casefold() for token in ("error", "failed", "crash")):
-            self._safe_log(
-                "warning", message, extra={"_intygsdrive_error_event": True}
-            )
+        normalized_event = event_name.casefold()
+        event_extra: dict[str, Any] = {"event": normalized_event}
+        failed_count = 1
+        if isinstance(data, dict):
+            with contextlib.suppress(TypeError, ValueError):
+                failed_count = int(data.get("failed", 0) or 0)
+        if normalized_event == "certificates.batch.completed" and failed_count == 0:
+            event_extra["recovery_key"] = "certificates.batch"
+        if any(token in normalized_event for token in ("error", "failed", "crash")):
+            event_extra["_intygsdrive_error_event"] = True
+            self._safe_log("warning", message, extra=event_extra)
             self._emit("logging.error_logged", {"event": event_name, "timestamp": datetime.now().isoformat(timespec="seconds")})
-        elif any(token in event_name for token in ("generated", "completed", "started", "imported")):
-            self._safe_log("info", message)
+        elif any(token in normalized_event for token in ("generated", "completed", "started", "imported")):
+            self._safe_log("info", message, extra=event_extra)
         else:
-            self._safe_log("debug", message)
+            self._safe_log("debug", message, extra=event_extra)
         if event_name == "certificate.generated":
             with self._stats_lock:
                 self._certificates_generated += 1
@@ -866,11 +916,36 @@ class Plugin:
             ]
             for level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
                 lines.append(f"{level:<10} {storage_stats.events_by_level.get(level, 0):>6}")
-            active_errors = len(getattr(self._error_handler, "active_errors", {}))
+            active_error_handler = self._error_handler
+            active_issues = (
+                active_error_handler.get_active_errors()
+                if callable(getattr(active_error_handler, "get_active_errors", None))
+                else []
+            )
             lines.extend([
-                "", f"Fel denna session: {self._errors}", f"Aktiva fel:         {active_errors}",
+                "", f"Fel denna session: {self._errors}",
+                f"Aktiva fel:         {len(active_issues)}",
                 f"Var.:               {self._warnings}", f"Lagrat:             {self._storage.count:,}",
+                "", "AKTIVA FEL", "─" * 34,
             ])
+            if not active_issues:
+                lines.append("Inga aktiva fel")
+            for issue in active_issues[:8]:
+                source = str(issue.get("source", "okänd källa"))
+                for prefix in ("recovery:", "event:"):
+                    if source.startswith(prefix):
+                        source = source[len(prefix):]
+                        break
+                if source.startswith("call:"):
+                    source = source.rsplit("|", 1)[-1]
+                summary = " ".join(str(issue.get("message", "Fel utan meddelande")).split())
+                last_seen = str(issue.get("last_seen", ""))
+                lines.append(
+                    f"• {source} ({issue.get('occurrences', 1)} loggposter; senast {last_seen})"
+                )
+                lines.append(f"  {summary[:140]}")
+            if len(active_issues) > 8:
+                lines.append(f"… och {len(active_issues) - 8} till")
         self._view.set_stats_text("\n".join(lines))
 
     def _update_view_alerts(self) -> None:
@@ -1075,10 +1150,15 @@ class Plugin:
         if self.archive_dir is not None and self.archive_dir.is_dir():
             with contextlib.suppress(OSError):
                 archived_files = sum(1 for path in self.archive_dir.iterdir() if path.is_file())
+        active_error_reader = getattr(self._error_handler, "get_active_errors", None)
+        active_error_count = (
+            len(active_error_reader()) if callable(active_error_reader)
+            else len(getattr(self._error_handler, "active_errors", {}))
+        )
         return {
             "total_events": storage_stats.total_events,
             "errors": storage_stats.errors,
-            "active_errors": len(getattr(self._error_handler, "active_errors", {})),
+            "active_errors": active_error_count,
             "warnings": storage_stats.warnings,
             "certificates_generated": self._certificates_generated,
             "events_per_minute": round(storage_stats.get_events_per_minute(), 2),

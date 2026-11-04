@@ -14,7 +14,7 @@ Version 9.0.0 (2026-09-21): kompat-yta mot plugin.py + uppgraderingar:
   • LogStorage: trådsäker deque med maxlen (minne), search med regex+bookmark,
     stats med events_per_minute/duration.
   • SmartRotatingHandler: gzip vid rollover (asynkron), infra.*-events.
-  • archive_old_logs enligt LOG-021 (archive/ rensas aldrig).
+  • archive_old_logs enligt LOG-021 (dagsarkiv gallras efter 21 dagar).
   • Export: txt/json/csv/html/md — alla atomiska och ÅÄÖ-säkra.
 """
 
@@ -24,7 +24,11 @@ import hashlib
 import html as _html
 import json
 import logging
+import os
 import shutil
+import stat
+import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -277,7 +281,7 @@ class SmartRotatingHandler(TimedRotatingFileHandler):
     """Dagsroterande logg: aktiv fil är ALLTID endast dagens logg.
 
     Vid midnattsrotation komprimeras den daterade filen till archive/ och tas
-    bort från den aktiva mappen. Arkivfiler lämnas kvar tills de tas bort separat.
+    bort från den aktiva mappen. Dagsarkiv gallras automatiskt efter 21 dagar.
     """
 
     def __init__(
@@ -318,6 +322,17 @@ class SmartRotatingHandler(TimedRotatingFileHandler):
                 except OSError:
                     _logger.exception("Kunde inte arkivera %s", old)
 
+    def rollover_if_due(self, *, force: bool = False) -> bool:
+        """Run a due midnight rollover even when no new log record arrives."""
+        self.acquire()
+        try:
+            if not force and time.time() < self.rolloverAt:
+                return False
+            self.doRollover()
+            return True
+        finally:
+            self.release()
+
     def close(self) -> None:
         super().close()
 
@@ -349,31 +364,20 @@ class ErrorSummaryFilter(logging.Filter):
 
 
 class ErrorLedgerHandler(logging.FileHandler):
-    """Persist errors until a matching success signal automatically resolves them."""
+    """Persist active errors and resolve them only on a matching recovery key."""
 
     _EVENT_GROUPS = {
         "certificate.generation_failed": "certificate.generation",
         "certificate.generated": "certificate.generation",
-        "cert.generate_failed": "cert.generate",
-        "cert.generated": "cert.generate",
+        "cert.generate_failed": "certificate.generation",
+        "cert.generate_error": "certificate.generation",
+        "cert.generated": "certificate.generation",
         "label.calibration_failed": "label.calibration",
         "label.calibration_printed": "label.calibration",
         "label.print_failed": "label.print",
         "label.printed": "label.print",
         "certificates.batch.failed": "certificates.batch",
-        "certificates.batch.completed": "certificates.batch",
     }
-    _SUCCESS_TERMS = (
-        "success", "succeeded", "completed", "generated", "saved", "updated",
-        "restored", "printed", "recovered", "finished", "lyckades", "slutförd",
-        "slutfört", "sparad", "sparat", "uppdaterad", "återställd", "genererad",
-        "utskriven", "färdig", "klart", "återhämtad",
-    )
-    _FAILURE_TERMS = (
-        "unsuccessful", "failed", "failure", "error", "exception", "unable",
-        "could not", "cannot", "can't", "never", "not ", "no ", "inte ", "ej ",
-        "misslyck", "fel ",
-    )
 
     def __init__(self, filename: Path | str, session_id: str = SESSION_ID) -> None:
         path = Path(filename)
@@ -381,9 +385,10 @@ class ErrorLedgerHandler(logging.FileHandler):
         super().__init__(str(path), mode="a", encoding="utf-8", delay=False)
         self.setLevel(logging.DEBUG)
         self.setFormatter(DetailedFormatter(session_id))
-        self.active_errors: dict[str, str] = {}
+        self.active_errors: dict[str, dict[str, Any]] = {}
         self._load_active_errors(path)
         self._intygsdrive_error_handler = True  # type: ignore[attr-defined]
+        self.prune_resolved()
 
     @classmethod
     def _event_name(cls, record: logging.LogRecord) -> str:
@@ -396,14 +401,13 @@ class ErrorLedgerHandler(logging.FileHandler):
         return ""
 
     @classmethod
-    def _event_group(cls, event: str) -> str:
-        return cls._EVENT_GROUPS.get(event, "")
-
-    @classmethod
     def _source_key(cls, record: logging.LogRecord, event: str) -> str:
+        recovery_key = getattr(record, "recovery_key", None)
+        if recovery_key:
+            return f"recovery:{str(recovery_key).strip().casefold()}"
         if event:
-            group = cls._event_group(event)
-            return f"event:{group or event}"
+            recovery_group = cls._EVENT_GROUPS.get(event)
+            return f"recovery:{recovery_group}" if recovery_group else f"event:{event}"
         return "call:{}|{}|{}".format(
             record.name,
             record.pathname,
@@ -422,7 +426,27 @@ class ErrorLedgerHandler(logging.FileHandler):
             try:
                 if line.startswith("[ERROR OPEN] "):
                     data = json.loads(line[len("[ERROR OPEN] "):])
-                    self.active_errors[str(data["id"])] = str(data["source"])
+                    issue_id = str(data["id"])
+                    self.active_errors[issue_id] = {
+                        "source": str(data["source"]),
+                        "opened": str(data.get("opened", "")),
+                        "last_seen": str(data.get("opened", "")),
+                        "level": str(data.get("level", "ERROR")),
+                        "message": str(data.get("message", data["source"])),
+                        "occurrences": int(data.get("occurrences", 1)),
+                    }
+                elif line.startswith("[ERROR REPEAT] "):
+                    data = json.loads(line[len("[ERROR REPEAT] "):])
+                    issue = self.active_errors.get(str(data["id"]))
+                    if issue is not None:
+                        issue["last_seen"] = str(data.get("at", issue["last_seen"]))
+                        issue["message"] = str(data.get("message", issue["message"]))
+                        issue["occurrences"] = int(data.get("occurrences", issue["occurrences"] + 1))
+                elif line.startswith("[ERROR RECORD id="):
+                    issue_id, _, formatted = line[len("[ERROR RECORD id="):].partition("] ")
+                    issue = self.active_errors.get(issue_id)
+                    if issue is not None:
+                        issue["message"] = formatted.rsplit(" | ", 1)[-1][:240]
                 elif line.startswith("[ERROR RESOLVED] "):
                     data = json.loads(line[len("[ERROR RESOLVED] "):])
                     self.active_errors.pop(str(data["id"]), None)
@@ -440,37 +464,61 @@ class ErrorLedgerHandler(logging.FileHandler):
 
     def _record_error(self, record: logging.LogRecord, source: str) -> None:
         issue_id = hashlib.sha256(source.encode("utf-8", errors="replace")).hexdigest()[:16]
-        if issue_id not in self.active_errors:
-            self.active_errors[issue_id] = source
-            self._write_metadata("OPEN", {
-                "id": issue_id,
+        at = datetime.fromtimestamp(record.created).isoformat(timespec="seconds")
+        message = record.getMessage().replace("\n", " ")[:240]
+        issue = self.active_errors.get(issue_id)
+        if issue is None:
+            issue = {
                 "source": source,
-                "opened": datetime.fromtimestamp(record.created).isoformat(timespec="seconds"),
-            })
+                "opened": at,
+                "last_seen": at,
+                "level": record.levelname,
+                "message": message,
+                "occurrences": 1,
+            }
+            self.active_errors[issue_id] = issue
+            self._write_metadata("OPEN", {"id": issue_id, **issue})
         else:
+            issue["last_seen"] = at
+            issue["message"] = message
+            issue["occurrences"] = int(issue.get("occurrences", 1)) + 1
             self._write_metadata("REPEAT", {
                 "id": issue_id,
-                "at": datetime.fromtimestamp(record.created).isoformat(timespec="seconds"),
+                "at": at,
+                "message": message,
+                "occurrences": issue["occurrences"],
             })
         self._write_line(f"[ERROR RECORD id={issue_id}] {self.format(record)}")
 
     def _resolve(self, record: logging.LogRecord, event: str) -> None:
         if not self.active_errors:
             return
-        success_source = self._source_key(record, event) if event else ""
-        if not success_source:
+        # Explicit event/recovery keys are authoritative; generic log records
+        # resolve only when they come from the same function and say they succeeded.
+        if event or getattr(record, "recovery_key", None):
+            success_source = self._source_key(record, event)
+        else:
             if record.levelno > logging.INFO:
                 return
             message = record.getMessage().casefold()
-            if any(term in message for term in self._FAILURE_TERMS):
-                return
-            if not any(term in message for term in self._SUCCESS_TERMS):
+            negative = (
+                "unsuccessful", "failed", "failure", "error", "exception", "unable",
+                "could not", "cannot", "can't", "never", "not ", "no ", "inte ",
+                "ej ", "misslyck", "fel ",
+            )
+            positive = (
+                "success", "succeeded", "completed", "generated", "saved", "updated",
+                "restored", "printed", "recovered", "finished", "lyckades", "slutförd",
+                "slutfört", "sparad", "sparat", "uppdaterad", "återställd", "genererad",
+                "utskriven", "färdig", "klart", "återhämtad",
+            )
+            if any(term in message for term in negative) or not any(term in message for term in positive):
                 return
             success_source = self._source_key(record, "")
 
         resolved = [
-            issue_id for issue_id, source in self.active_errors.items()
-            if source == success_source
+            issue_id for issue_id, issue in self.active_errors.items()
+            if issue.get("source") == success_source
         ]
         for issue_id in resolved:
             self._write_metadata("RESOLVED", {
@@ -479,6 +527,98 @@ class ErrorLedgerHandler(logging.FileHandler):
                 "at": datetime.fromtimestamp(record.created).isoformat(timespec="seconds"),
             })
             self.active_errors.pop(issue_id, None)
+
+    def get_active_errors(self) -> list[dict[str, Any]]:
+        self.acquire()
+        try:
+            return [
+                {"id": issue_id, **issue.copy()}
+                for issue_id, issue in self.active_errors.items()
+            ]
+        finally:
+            self.release()
+
+    @staticmethod
+    def _line_issue_id(line: str) -> str | None:
+        if line.startswith("[ERROR RECORD id="):
+            return line[len("[ERROR RECORD id="):].split("]", 1)[0]
+        for prefix in ("[ERROR OPEN] ", "[ERROR REPEAT] ", "[ERROR RESOLVED] "):
+            if line.startswith(prefix):
+                try:
+                    return str(json.loads(line[len(prefix):])["id"])
+                except (ValueError, KeyError, TypeError):
+                    return None
+        return None
+
+    def prune_resolved(self, older_than_days: int = ARCHIVE_AFTER_DAYS) -> int:
+        """Drop managed error history only after its issue has been resolved for the retention period."""
+        path = Path(self.baseFilename)
+        self.acquire()
+        temporary: Path | None = None
+        try:
+            if not path.is_file():
+                return 0
+            self.flush()
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+            active: set[str] = set()
+            resolved_at: dict[str, datetime] = {}
+            for line in lines:
+                if line.startswith("[ERROR OPEN] "):
+                    try:
+                        data = json.loads(line[len("[ERROR OPEN] "):])
+                        issue_id = str(data["id"])
+                        active.add(issue_id)
+                        resolved_at.pop(issue_id, None)
+                    except (ValueError, KeyError, TypeError):
+                        pass
+                elif line.startswith("[ERROR RESOLVED] "):
+                    try:
+                        data = json.loads(line[len("[ERROR RESOLVED] "):])
+                        issue_id = str(data["id"])
+                        active.discard(issue_id)
+                        resolved_at[issue_id] = datetime.fromisoformat(str(data["at"]))
+                    except (ValueError, KeyError, TypeError):
+                        pass
+            cutoff = datetime.now() - timedelta(days=max(0, older_than_days))
+            expired = {
+                issue_id for issue_id, resolved in resolved_at.items()
+                if issue_id not in active and resolved < cutoff
+            }
+            if not expired:
+                return 0
+            remaining = [
+                line for line in lines
+                if self._line_issue_id(line) not in expired
+            ]
+            mode = stat.S_IMODE(path.stat().st_mode)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+            )
+            temporary = Path(temporary_name)
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+                stream.writelines(remaining)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, mode)
+            if self.stream is not None:
+                self.stream.close()
+                self.stream = None
+            os.replace(temporary, path)
+            temporary = None
+            return len(expired)
+        except OSError as exc:
+            with suppress(OSError):
+                sys.stderr.write(f"[ERROR LEDGER] Could not prune resolved errors in {path}: {exc}\n")
+            return 0
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+            if self.stream is None and not self._closed:
+                try:
+                    self.stream = self._open()
+                except OSError:
+                    _logger.exception("Could not reopen error ledger %s", path)
+            self.release()
 
     def emit(self, record: logging.LogRecord) -> None:
         try:

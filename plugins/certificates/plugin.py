@@ -567,7 +567,11 @@ class Plugin:
     def _evt(self, event: str, msg: str, level: int = logging.INFO, **ctx: Any) -> None:
         """Strukturerad loggpost (cert.*) — får aldrig krascha appen."""
         try:
-            self._log.log(level, msg, extra={"event": event, "ctx": ctx or None})
+            extra = {"event": event, "ctx": ctx or None}
+            recovery_key = ctx.get("recovery_key")
+            if recovery_key:
+                extra["recovery_key"] = str(recovery_key)
+            self._log.log(level, msg, extra=extra)
         except Exception:
             pass
 
@@ -2176,7 +2180,7 @@ class Plugin:
         self._set_action_buttons_enabled(False)
         self._show_progress(True, "⏳ Förbereder generering…")
         self._evt("cert.generate_started", f"Generering startad: {name}",
-                  template=name, fields=len(values))
+                  template=name, fields=len(values), recovery_key="certificate.generation")
         self._emit_event("certificate.before_generate", {"template": name, "values": values})
         self._last_values = dict(values)  # tillgängliga som etikettfält
         self._pending_template_name = name
@@ -2241,9 +2245,13 @@ class Plugin:
             self._pending_template_name = ""
             error = str(_result_value(result, "error", "Okänt fel"))
             QMessageBox.critical(self._tab_widget, "Genereringsfel", error)
-            self._log.error("[CERTIFICATES] Genereringsfel: %s", error)
+            self._log.error(
+                "[CERTIFICATES] Genereringsfel: %s", error,
+                extra={"recovery_key": "certificate.generation"},
+            )
             self._evt("cert.generate_failed", f"Genereringsfel: {error}",
-                      level=logging.ERROR, error=error)
+                      level=logging.ERROR, error=error,
+                      recovery_key="certificate.generation")
             self._emit_event("certificate.generation_failed", {"error": error})
             return
 
@@ -2260,7 +2268,8 @@ class Plugin:
         )
         self._evt("cert.generated", f"Intyg #{number} skapat på {duration:.1f} s",
                   template=name, number=str(number), filename=filename,
-                  pages=int(pages or 0), duration=round(duration, 2))
+                  pages=int(pages or 0), duration=round(duration, 2),
+                  recovery_key="certificate.generation")
         self._update_total_label()
         _, template = self._selected_template()
         if template is not None:
@@ -2389,7 +2398,14 @@ class Plugin:
             f"Kalibrerar {chosen.name} på {printer_label}"
             if calibration else f"Skriver ut {copies} × {chosen.name} på {printer_label}"
         )
-        self._evt(event, message, label=chosen.name, copies=copies, printer=printer_label)
+        self._evt(
+            event,
+            message,
+            label=chosen.name,
+            copies=copies,
+            printer=printer_label,
+            recovery_key="label.calibration" if calibration else "label.print",
+        )
         self._set_status(
             f"🧭 Skriver ut kalibreringsmönster på {printer_label}…"
             if calibration else f"🏷️ Skriver ut {copies} etikett(er) på {printer_label}…"
@@ -2424,6 +2440,7 @@ class Plugin:
                     printer=self._label_printer_name or "Windows standardskrivare",
                     fields_filled=len(result.filled),
                     duration=round(result.duration, 2),
+                    recovery_key="label.calibration",
                 )
                 QMessageBox.information(
                     self._tab_widget,
@@ -2443,12 +2460,14 @@ class Plugin:
                     copies=result.copies,
                     filled=result.filled,
                     duration=round(result.duration, 2),
+                    recovery_key="label.print",
                 )
             return
         self._set_status(f"❌ Etikettutskrift misslyckades: {result.label}")
         event = "label.calibration_failed" if calibration else "label.print_failed"
         self._evt(event, f"Etikettutskrift misslyckades: {result.error}",
-                  level=logging.ERROR, label=result.label, error=result.error)
+                  level=logging.ERROR, label=result.label, error=result.error,
+                  recovery_key="label.calibration" if calibration else "label.print")
         QMessageBox.warning(self._tab_widget, "Etikett", result.error)
 
     @Slot(str)
@@ -2458,9 +2477,13 @@ class Plugin:
         self._show_progress(False)
         self._restore_action_buttons()
         QMessageBox.critical(self._tab_widget, "Oväntat genereringsfel", error)
-        self._log.error("[CERTIFICATES] Oväntat genereringsfel: %s", error)
+        self._log.error(
+            "[CERTIFICATES] Oväntat genereringsfel: %s", error,
+            extra={"recovery_key": "certificate.generation"},
+        )
         self._evt("cert.generate_error", f"Oväntat genereringsfel: {error}",
-                  level=logging.ERROR, error=error)
+                  level=logging.ERROR, error=error,
+                  recovery_key="certificate.generation")
         self._emit_event("certificate.generation_failed", {"error": error})
 
     # ── Batch ─────────────────────────────────────────────────────────────
@@ -2524,7 +2547,7 @@ class Plugin:
         )
         self._set_action_buttons_enabled(False)
         self._evt("cert.batch_started", f"Batch startad: {len(rows)} rader med '{name}'",
-                  template=name, rows=len(rows))
+                  template=name, rows=len(rows), recovery_key="certificates.batch")
         self._emit_event("certificates.batch.started", {"template": name, "count": len(rows)})
         worker = _BatchWorker(generator, template, rows)
         worker.signals.progress.connect(
@@ -2573,9 +2596,20 @@ class Plugin:
             "[CERTIFICATES] Batch klar: %d/%d OK, %d fel, %.1f s",
             succeeded, total, failed, duration,
         )
+        if failed:
+            self._evt(
+                "cert.batch_partial_failure",
+                f"Batch klar med fel: {failed}/{total} misslyckades",
+                level=logging.ERROR,
+                succeeded=succeeded,
+                failed=failed,
+                total=total,
+                recovery_key="certificates.batch",
+            )
         self._evt("cert.batch_done", f"Batch klar: {succeeded}/{total} på {duration:.1f} s",
                   succeeded=succeeded, failed=failed, total=total,
-                  duration=round(duration, 2))
+                  duration=round(duration, 2),
+                  recovery_key="certificates.batch" if failed == 0 else None)
         self._update_total_label()
         _, template = self._selected_template()
         if template is not None:
@@ -2600,9 +2634,14 @@ class Plugin:
         dialog.reject()
         self._restore_action_buttons()
         QMessageBox.critical(self._tab_widget, "Batch-fel", error)
-        self._log.error("[CERTIFICATES] Batch-fel: %s", error)
-        self._evt("cert.batch_error", f"Batch-fel: {error}", level=logging.ERROR, error=error)
-        self._emit_event("certificate.generation_failed", {"error": error})
+        self._log.error(
+            "[CERTIFICATES] Batch-fel: %s", error,
+            extra={"recovery_key": "certificates.batch"},
+        )
+        self._evt("cert.batch_error", f"Batch-fel: {error}",
+                  level=logging.ERROR, error=error,
+                  recovery_key="certificates.batch")
+        self._emit_event("certificates.batch.failed", {"error": error})
 
     # ── Import och filöppning ─────────────────────────────────────────────
 

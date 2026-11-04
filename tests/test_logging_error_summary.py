@@ -3,11 +3,12 @@ import gzip
 import importlib.util
 import json
 import logging
+import os
 import sys
 import time
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -18,6 +19,7 @@ if SPEC is None or SPEC.loader is None:
 LOGGING_CORE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = LOGGING_CORE
 SPEC.loader.exec_module(LOGGING_CORE)
+archive_old_logs = LOGGING_CORE.archive_old_logs
 create_error_file_handler = LOGGING_CORE.create_error_file_handler
 create_general_file_handler = LOGGING_CORE.create_general_file_handler
 
@@ -78,7 +80,9 @@ class ErrorSummaryLogTests(unittest.TestCase):
             logger.addHandler(handler)
             try:
                 logger.info("previous day archive marker")
+                self.assertFalse(handler.rollover_if_due())
                 handler.rolloverAt = int(time.time()) - 1
+                self.assertTrue(handler.rollover_if_due())
                 logger.info("new day marker")
             finally:
                 logger.removeHandler(handler)
@@ -93,6 +97,22 @@ class ErrorSummaryLogTests(unittest.TestCase):
             active = (root / "app.log").read_text(encoding="utf-8")
             self.assertIn("new day marker", active)
             self.assertNotIn("previous day archive marker", active)
+
+    def test_daily_archives_are_pruned_after_the_retention_period(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "archive"
+            archive.mkdir()
+            expired = archive / "app.log.2024-01-01.gz"
+            retained = archive / "app.log.2099-01-01.gz"
+            expired.write_bytes(b"old archive")
+            retained.write_bytes(b"new archive")
+            old_timestamp = time.time() - 30 * 24 * 60 * 60
+            os.utime(expired, (old_timestamp, old_timestamp))
+
+            archive_old_logs(temporary, older_than_days=21)
+
+            self.assertFalse(expired.exists())
+            self.assertTrue(retained.exists())
 
     def test_active_error_is_persisted_then_marked_resolved_after_same_function_success(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -164,6 +184,108 @@ class ErrorSummaryLogTests(unittest.TestCase):
             contents = error_file.read_text(encoding="utf-8")
             self.assertIn("certificate.generation_failed", contents)
             self.assertIn("[ERROR RESOLVED]", contents)
+
+    def test_explicit_recovery_key_links_failure_and_success_across_functions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            error_file = Path(temporary) / "errors.log"
+            handler = create_error_file_handler(error_file, session_id="test-session")
+            logger = logging.getLogger(f"recovery-key-{id(error_file)}")
+            old_level, old_propagate = logger.level, logger.propagate
+            logger.setLevel(logging.DEBUG)
+            logger.propagate = False
+            logger.addHandler(handler)
+            try:
+                logger.error("generation failed", extra={"recovery_key": "certificate.generation"})
+                self.assertEqual(len(handler.active_errors), 1)
+                logger.info("another operation succeeded", extra={"recovery_key": "label.print"})
+                self.assertEqual(len(handler.active_errors), 1)
+                logger.info("generation recovered", extra={"recovery_key": "certificate.generation"})
+                self.assertEqual(len(handler.active_errors), 0)
+            finally:
+                logger.removeHandler(handler)
+                handler.close()
+                logger.setLevel(old_level)
+                logger.propagate = old_propagate
+
+    def test_partial_batch_completion_does_not_recover_batch_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            error_file = Path(temporary) / "errors.log"
+            handler = create_error_file_handler(error_file, session_id="test-session")
+            logger = logging.getLogger(f"batch-recovery-{id(error_file)}")
+            old_level, old_propagate = logger.level, logger.propagate
+            logger.setLevel(logging.DEBUG)
+            logger.propagate = False
+            logger.addHandler(handler)
+            try:
+                logger.error("batch failed", extra={"recovery_key": "certificates.batch"})
+                logger.info(
+                    "batch completed with failures",
+                    extra={"event": "certificates.batch.completed"},
+                )
+                self.assertEqual(len(handler.active_errors), 1)
+                logger.info(
+                    "batch completed successfully",
+                    extra={
+                        "event": "certificates.batch.completed",
+                        "recovery_key": "certificates.batch",
+                    },
+                )
+                self.assertEqual(len(handler.active_errors), 0)
+            finally:
+                logger.removeHandler(handler)
+                handler.close()
+                logger.setLevel(old_level)
+                logger.propagate = old_propagate
+
+    def test_resolved_error_history_expires_but_active_errors_do_not(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            error_file = Path(temporary) / "errors.log"
+            resolved_logger = logging.getLogger(f"resolved-history-{id(error_file)}")
+            active_logger = logging.getLogger(f"active-history-{id(error_file)}")
+            previous = [(logger, logger.level, logger.propagate) for logger in (resolved_logger, active_logger)]
+            handler = create_error_file_handler(error_file, session_id="test-session")
+            for logger in (resolved_logger, active_logger):
+                logger.setLevel(logging.DEBUG)
+                logger.propagate = False
+                logger.addHandler(handler)
+            try:
+                resolved_logger.error("resolved issue marker")
+                resolved_logger.info("operation succeeded")
+                active_logger.error("active issue marker")
+            finally:
+                for logger in (resolved_logger, active_logger):
+                    logger.removeHandler(handler)
+                handler.close()
+                for logger, old_level, old_propagate in previous:
+                    logger.setLevel(old_level)
+                    logger.propagate = old_propagate
+
+            old_date = (datetime.now() - timedelta(days=30)).isoformat(timespec="seconds")
+            lines = error_file.read_text(encoding="utf-8").splitlines()
+            aged_lines = []
+            for line in lines:
+                if line.startswith("[ERROR OPEN] "):
+                    data = json.loads(line[len("[ERROR OPEN] "):])
+                    data["opened"] = old_date
+                    data["last_seen"] = old_date
+                    line = "[ERROR OPEN] " + json.dumps(data, ensure_ascii=False, sort_keys=True)
+                elif line.startswith("[ERROR RESOLVED] "):
+                    data = json.loads(line[len("[ERROR RESOLVED] "):])
+                    data["at"] = old_date
+                    line = "[ERROR RESOLVED] " + json.dumps(data, ensure_ascii=False, sort_keys=True)
+                aged_lines.append(line)
+            error_file.write_text("\n".join(aged_lines) + "\n", encoding="utf-8")
+
+            resumed = create_error_file_handler(error_file, session_id="test-session")
+            try:
+                active = resumed.get_active_errors()
+                self.assertEqual(len(active), 1)
+                self.assertEqual(active[0]["message"], "active issue marker")
+                contents = error_file.read_text(encoding="utf-8")
+                self.assertNotIn("resolved issue marker", contents)
+                self.assertIn("active issue marker", contents)
+            finally:
+                resumed.close()
 
     def test_collects_errors_and_tagged_failure_events_but_not_plain_warnings(self):
         with tempfile.TemporaryDirectory() as temporary:
