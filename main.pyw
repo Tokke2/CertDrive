@@ -959,7 +959,7 @@ class MainWindow(QMainWindow):
             ("Öppna mallar", "SP_DirOpenIcon", APP_PATH / FOLDER_TEMPLATES),
             ("Öppna output", "SP_DirOpenIcon", APP_PATH / FOLDER_OUTPUT),
             ("Öppna plugins", "SP_DirOpenIcon", APP_PATH / FOLDER_PLUGINS),
-            ("Öppna loggar", "SP_FileDialogDetailedView", APP_PATH / FOLDER_LOGS),
+            ("Öppna loggar", "SP_FileDialogDetailedView", APP_PATH / FOLDER_LOGS / "logging"),
             ("Öppna backup", "SP_DriveHDIcon", APP_PATH / FOLDER_BACKUP),
             ("Öppna skickade", "SP_DirOpenIcon", APP_PATH / FOLDER_SENT),
         )

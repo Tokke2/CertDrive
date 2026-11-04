@@ -9,10 +9,10 @@ Version: 8.9.0 (uppgraderad från 8.8.1, 2026-09-18)
 Intygsgenerator — central logging-controller. Skriver all loggning till app.log
 och speglar fel till errors.log; behåller crash hooks, EventBus och Logger UI.
 
-Logglayout: exakt två loggerfiler — app.log innehåller alla nivåer och errors.log
-innehåller fel och uttryckligen markerade felhändelser. Loggar roteras eller arkiveras
-inte till extrafiler. Tidigare JSONL-, crash- och roterade loggar migreras in i de två
-filerna vid uppstart; gamla poster bevaras.
+Logglayout: exakt två loggerfiler i <app>/logs/logging/ — app.log innehåller alla
+nivåer och errors.log innehåller fel och uttryckligen markerade felhändelser. Loggar
+roteras eller arkiveras inte till extrafiler. Äldre loggerfiler migreras dit vid
+uppstart och tas bort först efter att innehållet har skrivits säkert till de nya filerna.
 """
 
 import atexit
@@ -166,6 +166,7 @@ class Plugin:
         self.session_id = CORE_SESSION_ID
         self.session_start = datetime.now()
         self.log_dir: Path | None = None
+        self._legacy_log_dir: Path | None = None
         self.archive_dir: Path | None = None
         self.current_log_file: Path | None = None
         self.json_log_file: Path | None = None
@@ -325,33 +326,56 @@ class Plugin:
         getter = getattr(self._context, "get_path", None) if self._context is not None else None
         if callable(getter):
             try:
-                self.log_dir = Path(getter("logs"))
+                self._legacy_log_dir = Path(getter("logs"))
             except Exception:
                 _logger.exception("[LOGGING] Kunde inte hämta logs-sökväg")
-        if self.log_dir is None:
-            self.log_dir = Path(__file__).resolve().parent.parent.parent / "logs"
+        if self._legacy_log_dir is None:
+            self._legacy_log_dir = Path(__file__).resolve().parent.parent.parent / "logs"
+
+        # Keep this logger's files separate from any other app diagnostics.
+        self.log_dir = self._legacy_log_dir / "logging"
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.archive_dir = self.log_dir / "archive"  # legacy archive path; no new archive files
+        self.archive_dir = self.log_dir / "archive"  # legacy path; no new archives
         self.current_log_file = self.log_dir / "app.log"
         self.json_log_file = None  # JSONL events are stored in app.log/UI memory, not a third file
         self.crash_log_file = None  # crashes are routed to both app.log and errors.log
         self.error_log_file = self.log_dir / "errors.log"
 
     def _migrate_legacy_logs(self) -> None:
-        """Fold old JSONL/crash/rotated logs into the two current files safely."""
-        if self.log_dir is None or self.current_log_file is None or self.error_log_file is None:
+        """Move legacy logger files into logs/logging without losing their contents."""
+        if (
+            self.log_dir is None
+            or self._legacy_log_dir is None
+            or self.current_log_file is None
+            or self.error_log_file is None
+        ):
             return
-        sources: set[Path] = set()
-        for pattern in ("session_*.jsonl", "crash.log", "app.log.*", "errors.log.*"):
-            sources.update(path for path in self.log_dir.glob(pattern) if path.is_file())
-        if self.archive_dir is not None and self.archive_dir.is_dir():
-            sources.update(
-                path for path in self.archive_dir.rglob("*")
-                if path.is_file() and (path.suffix in {".gz", ".log", ".jsonl"})
-            )
+
+        # Migrate the former logs/ layout, plus any extra legacy files that may
+        # already exist in logs/logging/. Never consume unrelated files.
+        source_roots: list[tuple[Path, str, bool]] = [
+            (self._legacy_log_dir, "legacy", True),
+            (self.log_dir, "previous", False),
+        ]
+        sources: dict[Path, str] = {}
+        for root, label, include_current_files in source_roots:
+            if not root.is_dir():
+                continue
+            patterns = ["session_*.jsonl", "crash.log", "app.log.*", "errors.log.*"]
+            if include_current_files:
+                patterns.extend(("app.log", "errors.log"))
+            for pattern in patterns:
+                for path in root.glob(pattern):
+                    if path.is_file() and path not in {self.current_log_file, self.error_log_file}:
+                        sources[path] = f"{label}/{path.relative_to(root).as_posix()}"
+            archive = root / "archive"
+            if archive.is_dir():
+                for path in archive.rglob("*"):
+                    if path.is_file() and path.suffix in {".gz", ".log", ".jsonl"}:
+                        sources[path] = f"{label}/archive/{path.relative_to(archive).as_posix()}"
 
         def read_text(path: Path) -> str:
-            opener = gzip.open if path.suffix == ".gz" else open
+            opener = gzip.open if path.suffix.casefold() == ".gz" else open
             with opener(path, "rb") as stream:
                 return stream.read().decode("utf-8", errors="replace")
 
@@ -377,10 +401,13 @@ class Plugin:
                     ):
                         kept.append(line)
                 return "\n".join(kept)
-            kept = []
+
+            kept: list[str] = []
             capturing = False
             for line in text.splitlines():
-                is_record_start = bool(re.match(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}", line))
+                is_record_start = bool(
+                    re.match(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}", line)
+                )
                 is_error_start = bool(re.search(r"\|\s*(ERROR|CRITICAL)\s*\|", line))
                 is_tagged_warning = bool(re.search(
                     r"\|\s*WARNING\s*\|.*(?:error|failed|crash|exception|misslyck|fel)",
@@ -395,56 +422,47 @@ class Plugin:
                     kept.append(line)
             return "\n".join(kept)
 
-        for source in sorted(sources, key=lambda item: str(item).casefold()):
+        def append_once(destination: Path, marker: str, content: str) -> None:
+            begin_marker = f"[LEGACY LOG IMPORT BEGIN] {marker}"
+            done_marker = f"[LEGACY LOG IMPORT END] {marker}"
+            existing = destination.read_text(encoding="utf-8", errors="replace") \
+                if destination.is_file() else ""
+            if done_marker in existing:
+                return
+            with destination.open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write(f"\n{begin_marker}\n{content}\n{done_marker}\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+
+        def source_age(path: Path) -> tuple[float, str]:
+            try:
+                return path.stat().st_mtime, str(path).casefold()
+            except OSError:
+                return 0.0, str(path).casefold()
+
+        for source in sorted(sources, key=source_age):
+            marker = sources[source]
             try:
                 text = read_text(source)
-                relative = source.relative_to(self.log_dir).as_posix()
-                marker = f"[LEGACY LOG IMPORT] {relative}"
-                current_general = self.current_log_file.read_text(encoding="utf-8", errors="replace") \
-                    if self.current_log_file.is_file() else ""
-                if marker not in current_general:
-                    with self.current_log_file.open("a", encoding="utf-8", newline="\n") as stream:
-                        stream.write(f"\n{marker}\n{text}\n")
-                        stream.flush()
-                        os.fsync(stream.fileno())
+                append_once(self.current_log_file, marker, text)
                 errors = error_excerpt(source, text)
                 if errors:
-                    current_errors = self.error_log_file.read_text(encoding="utf-8", errors="replace") \
-                        if self.error_log_file.is_file() else ""
-                    if marker not in current_errors:
-                        with self.error_log_file.open("a", encoding="utf-8", newline="\n") as stream:
-                            stream.write(f"\n{marker}\n{errors}\n")
-                            stream.flush()
-                            os.fsync(stream.fileno())
+                    append_once(self.error_log_file, marker, errors)
+                # The full source has been fsynced to app.log, and any errors
+                # mirrored to errors.log, before removing this logger-owned file.
                 source.unlink()
-            except OSError:
+            except (OSError, EOFError, ValueError):
                 _logger.exception("[LOGGING] Kunde inte migrera äldre loggfil %s", source.name)
 
-        # app.log itself is the general destination and must stay in place; copy
-        # its historical errors to the error file once without removing history.
-        try:
-            if self.current_log_file.is_file():
-                current_text = self.current_log_file.read_text(encoding="utf-8", errors="replace")
-                errors = error_excerpt(self.current_log_file, current_text)
-                marker = "[LEGACY LOG ERRORS IMPORT] app.log"
-                if errors:
-                    current_errors = self.error_log_file.read_text(encoding="utf-8", errors="replace") \
-                        if self.error_log_file.is_file() else ""
-                    if errors not in current_errors and marker not in current_errors:
-                        with self.error_log_file.open("a", encoding="utf-8", newline="\n") as stream:
-                            stream.write(f"\n{marker}\n{errors}\n")
-                            stream.flush()
-                            os.fsync(stream.fileno())
-        except OSError:
-            _logger.exception("[LOGGING] Kunde inte kopiera historiska fel från app.log")
-
-        if self.archive_dir is not None and self.archive_dir.is_dir():
-            for directory in sorted(self.archive_dir.rglob("*"), reverse=True):
-                if directory.is_dir():
-                    with contextlib.suppress(OSError):
-                        directory.rmdir()
-            with contextlib.suppress(OSError):
-                self.archive_dir.rmdir()
+        for root, _label, _include_current_files in source_roots:
+            archive = root / "archive"
+            if archive.is_dir():
+                for directory in sorted(archive.rglob("*"), reverse=True):
+                    if directory.is_dir():
+                        with contextlib.suppress(OSError):
+                            directory.rmdir()
+                with contextlib.suppress(OSError):
+                    archive.rmdir()
 
     def _setup_logging(self) -> None:
         logger = logging.getLogger("Intygsgenerator")
