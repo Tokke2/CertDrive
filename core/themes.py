@@ -38,6 +38,8 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import QApplication
 
+from core.design_tokens import SHAPE, SPACING, scaled
+
 if TYPE_CHECKING:
     from core import AppContext
 
@@ -278,6 +280,7 @@ class ThemeManager:
         self._observers: list[Callable[[Theme], None]] = []
         self._unsub_fns: list[Callable[[], None]] = []
         self._font_cache: dict[str, QFont] = {}
+        self._font_size_override: int | None = None
 
         # 2.3.0: cache för systemtema (H2) — detektering är dyr på Linux/macOS.
         self._system_cache: Theme | None = None
@@ -491,56 +494,91 @@ class ThemeManager:
         return 1.0
 
     def _apply_stylesheet(self, app: Any) -> None:
-        """
-        Applicera minimal QSS.
+        """Apply shared surface, control, focus and primary-action styling."""
+        try:
+            font_height = max(1, app.fontMetrics().height())
+        except Exception:
+            font_height = 16
 
-        Huvudfärgsättning sker via QPalette; QSS används här för tooltip,
-        scrollbar samt fet och tydlig knapp-/fliktext.
-        2.3.0: alla px-värden skalas med fontmetrik (_ui_scale).
-        """
-        s = self._ui_scale(app)
-
-        def px(value: float) -> int:
-            return max(1, int(round(value * s)))
+        def px(value: int) -> int:
+            return scaled(value, font_height)
 
         stylesheet = f"""
 QToolTip {{
     background-color: {self.get_color("tooltip_bg")};
     color: {self.get_color("tooltip_fg")};
     border: 1px solid {self.get_color("border")};
-    padding: {px(4)}px {px(8)}px;
-    border-radius: {px(4)}px;
-    font-size: {px(13)}px;
+    padding: {px(SPACING.xsmall)}px {px(SPACING.small)}px;
+    border-radius: {px(SHAPE.radius_small)}px;
+}}
+QFrame[designSurface="true"] {{
+    background-color: {self.get_color("base")};
+    border: 1px solid {self.get_color("border")};
+    border-radius: {px(SHAPE.radius_medium)}px;
+}}
+QLabel[uiRole="sectionTitle"] {{
+    color: {self.get_color("fg")};
+    font-weight: bold;
+    padding: {px(SPACING.xsmall)}px 0;
 }}
 QPushButton {{
-    font-weight: bold;
+    font-weight: 600;
     background-color: {self.get_color("button")};
     color: {self.get_color("button_text")};
     border: 1px solid {self.get_color("border")};
-    border-radius: {px(4)}px;
-    padding: {px(5)}px {px(14)}px;
-    min-height: {px(26)}px;
+    border-radius: {px(SHAPE.radius_small)}px;
+    padding: {px(SPACING.small)}px {px(SPACING.medium)}px;
+    min-height: {px(SHAPE.control_height)}px;
 }}
 QPushButton:hover {{
-    background-color: {self.get_color("accent")};
+    background-color: {self.get_color("accent_hover")};
     color: {self.get_color("accent_fg")};
-    border-color: {self.get_color("accent")};
+    border-color: {self.get_color("accent_hover")};
 }}
 QPushButton:pressed {{
     background-color: {self.get_color("accent_hover")};
+    color: {self.get_color("accent_fg")};
+}}
+QPushButton:focus, QLineEdit:focus, QComboBox:focus, QSpinBox:focus,
+QDoubleSpinBox:focus, QTextEdit:focus, QPlainTextEdit:focus {{
+    border: 2px solid {self.get_color("accent")};
+}}
+QPushButton[uiRole="primary"] {{
+    background-color: {self.get_color("accent")};
+    color: {self.get_color("accent_fg")};
+    border-color: {self.get_color("accent")};
+    font-weight: bold;
+}}
+QPushButton[uiRole="primary"]:hover {{
+    background-color: {self.get_color("accent_hover")};
+    border-color: {self.get_color("accent_hover")};
+}}
+QPushButton[uiRole="primary"]:disabled {{
+    background-color: {self.get_color("disabled_bg")};
+    color: {self.get_color("disabled")};
+    border-color: {self.get_color("border")};
 }}
 QPushButton:disabled {{
     background-color: {self.get_color("disabled_bg")};
     color: {self.get_color("disabled")};
 }}
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QPlainTextEdit {{
+    background-color: {self.get_color("base")};
+    color: {self.get_color("text")};
+    border: 1px solid {self.get_color("border")};
+    border-radius: {px(SHAPE.radius_small)}px;
+    padding: {px(SPACING.xsmall)}px {px(SPACING.small)}px;
+    selection-background-color: {self.get_color("selection_bg")};
+    selection-color: {self.get_color("selection_fg")};
+}}
 QTabBar::tab {{
-    font-weight: bold;
+    font-weight: 600;
     background-color: {self.get_color("button")};
     color: {self.get_color("button_text")};
-    padding: {px(6)}px {px(16)}px;
+    padding: {px(SPACING.small)}px {px(SPACING.medium)}px;
     border: 1px solid {self.get_color("border")};
     border-bottom: none;
-    border-radius: {px(4)}px {px(4)}px 0 0;
+    border-radius: {px(SHAPE.radius_small)}px {px(SHAPE.radius_small)}px 0 0;
     min-width: {px(80)}px;
 }}
 QTabBar::tab:selected {{
@@ -555,14 +593,7 @@ QHeaderView::section {{
     background-color: {self.get_color("header_bg")};
     color: {self.get_color("fg")};
     border: 1px solid {self.get_color("border")};
-    padding: {px(4)}px {px(8)}px;
-}}
-QGroupBox::title {{
-    font-weight: bold;
-    color: {self.get_color("fg")};
-}}
-QLabel[heading="true"] {{
-    font-weight: bold;
+    padding: {px(SPACING.xsmall)}px {px(SPACING.small)}px;
 }}
 QScrollBar:vertical {{
     background: {self.get_color("secondary_bg")};
@@ -656,8 +687,40 @@ QScrollBar::add-line, QScrollBar::sub-line {{
 
         return palette
 
+    def _configured_font_size(self) -> int:
+        if self._font_size_override is not None:
+            return self._font_size_override
+        settings = getattr(self._context, "settings", None) if self._context else None
+        for key in ("general.font_size", "ui.font_size"):
+            getter = getattr(settings, "get", None)
+            if callable(getter):
+                try:
+                    value = int(getter(key, 10))
+                    return max(8, min(18, value))
+                except (TypeError, ValueError):
+                    continue
+                except Exception:
+                    self._log.debug("Kunde inte läsa fontstorlek %s", key)
+        return 10
+
+    def set_font_size(self, size: int) -> None:
+        """Apply a persisted 8–18 pt size without allowing theme changes to reset it."""
+        self._font_size_override = max(8, min(18, int(size)))
+        self._font_cache.clear()
+        app = QApplication.instance()
+        if app is not None:
+            self._apply_font(app)
+            self._apply_stylesheet(app)
+        _evt(
+            self._log,
+            "theme.font_size_applied",
+            f"Grundtextstorlek applicerad: {self._font_size_override} pt",
+            logging.INFO,
+            point_size=self._font_size_override,
+        )
+
     def _build_fonts(self) -> dict[str, QFont]:
-        """Bygg plattformsanpassade QFont-objekt."""
+        """Build a coherent type scale from the user's selected base size."""
         if sys.platform == "win32":
             family = "Segoe UI"
             mono_family = "Consolas"
@@ -667,9 +730,10 @@ QScrollBar::add-line, QScrollBar::sub-line {{
         else:
             family = "Ubuntu"
             mono_family = "Ubuntu Mono"
+        base = self._configured_font_size()
 
-        def make(size: int, bold: bool = False, monospace: bool = False) -> QFont:
-            font = QFont(mono_family if monospace else family, size)
+        def make(size: float, bold: bool = False, monospace: bool = False) -> QFont:
+            font = QFont(mono_family if monospace else family, max(8, round(size)))
             font.setBold(bold)
             font.setStyleHint(
                 QFont.StyleHint.Monospace
@@ -679,18 +743,18 @@ QScrollBar::add-line, QScrollBar::sub-line {{
             return font
 
         return {
-            "base": make(10),
-            "bold": make(10, bold=True),
-            "small": make(9),
-            "heading": make(14, bold=True),
-            "subheading": make(11, bold=True),
-            "mono": make(10, monospace=True),
-            "button": make(10, bold=True),
-            "tab": make(10, bold=True),
+            "base": make(base),
+            "bold": make(base, bold=True),
+            "small": make(max(8, base - 1)),
+            "heading": make(base + 4, bold=True),
+            "subheading": make(base + 1, bold=True),
+            "mono": make(base, monospace=True),
+            "button": make(base, bold=True),
+            "tab": make(base, bold=True),
         }
 
     def get_font(self, role: str = "base") -> QFont:
-        """Returnera QFont för given roll, cachad."""
+        """Return the cached QFont for a semantic type role."""
         if not self._font_cache:
             self._font_cache = self._build_fonts()
         return self._font_cache.get(role, self._font_cache["base"])

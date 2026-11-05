@@ -165,7 +165,12 @@ def print_label(
                 )
         if calibration:
             stage = "läsa mallens textfält"
-            text_count = int(document.GetTextCount())
+            # b-PAC versions expose GetTextCount differently: some wrappers
+            # publish a method, others a read-only integer property. Support both.
+            text_count_member = getattr(document, "GetTextCount", 0)
+            text_count = int(
+                text_count_member() if callable(text_count_member) else text_count_member
+            )
             if text_count <= 0:
                 raise RuntimeError(
                     "Den valda .lbx-mallen har inga redigerbara textfält att kalibrera. "

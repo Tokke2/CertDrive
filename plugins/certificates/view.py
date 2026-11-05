@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from PySide6.QtCore import QEvent, Qt, Signal
+from core.design_tokens import SPACING, SHAPE, scaled
 from .layout import field_column_count
 
 from PySide6.QtWidgets import (
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QScrollArea,
+    QStyle,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -70,9 +72,7 @@ def _sp(base: int) -> int:
     try:
         app = QApplication.instance()
         if app is not None:
-            height = app.fontMetrics().height()
-            if height > 0:
-                return max(base, int(round(base * height / 16.0)))
+            return scaled(base, app.fontMetrics().height(), minimum=base)
     except Exception:
         pass
     return base
@@ -105,11 +105,16 @@ class FieldsScrollArea(QScrollArea):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._content = QWidget(self)
         self._layout = QGridLayout(self._content)
-        self._layout.setContentsMargins(_sp(4), _sp(3), _sp(4), _sp(3))
-        self._layout.setHorizontalSpacing(_sp(10))
-        self._layout.setVerticalSpacing(_sp(1))
+        self._layout.setContentsMargins(
+            _sp(SPACING.medium), _sp(SPACING.small),
+            _sp(SPACING.medium), _sp(SPACING.small),
+        )
+        self._layout.setHorizontalSpacing(_sp(SPACING.medium))
+        self._layout.setVerticalSpacing(_sp(SPACING.small))
         self._notices: list[QWidget] = []
         self._fields: list[QWidget] = []
+        self._field_groups: list[tuple[str, list[QWidget]]] = []
+        self._group_headings: list[QLabel] = []
         self._columns = 1
         self._content.installEventFilter(self)
         self.setWidget(self._content)
@@ -131,6 +136,8 @@ class FieldsScrollArea(QScrollArea):
                 widget.deleteLater()
         self._notices.clear()
         self._fields.clear()
+        self._field_groups.clear()
+        self._group_headings.clear()
         self._columns = 0
 
     def set_content(
@@ -138,19 +145,38 @@ class FieldsScrollArea(QScrollArea):
         *,
         notices: list[QWidget] | None = None,
         fields: list[QWidget] | None = None,
+        field_groups: list[tuple[str, list[QWidget]]] | None = None,
     ) -> None:
-        """Lay out all form fields in responsive columns, with scroll as fallback."""
+        """Lay out grouped form fields responsively, with scrolling as fallback."""
+        for heading in self._group_headings:
+            heading.deleteLater()
+        self._group_headings = []
         self._notices = list(notices or [])
-        self._fields = list(fields or [])
+        self._field_groups = [
+            (str(title), list(group_fields))
+            for title, group_fields in (field_groups or [])
+            if group_fields
+        ]
+        self._fields = (
+            [field for _title, group_fields in self._field_groups for field in group_fields]
+            if self._field_groups
+            else list(fields or [])
+        )
+        for title, _group_fields in self._field_groups:
+            heading = QLabel(title, self._content)
+            heading.setProperty("uiRole", "sectionTitle")
+            heading.setAccessibleName(title)
+            self._group_headings.append(heading)
         self._columns = 0
         self._reflow_fields()
         self.updateGeometry()
         self.scroll_to_top()
 
     def _column_count(self) -> int:
-        # QWidget widths are Qt logical pixels; do not multiply by a DPI ratio.
+        # QWidget widths are logical pixels; font height adds accessible scaling.
         width = max(self.viewport().width(), self.width())
-        return field_column_count(width)
+        font_height = self._content.fontMetrics().height()
+        return field_column_count(width, font_height)
 
     def _reflow_fields(self) -> None:
         columns = self._column_count()
@@ -166,8 +192,20 @@ class FieldsScrollArea(QScrollArea):
         for notice in self._notices:
             self._layout.addWidget(notice, row, 0, 1, columns)
             row += 1
-        for index, field in enumerate(self._fields):
-            self._layout.addWidget(field, row + index // columns, index % columns)
+        if self._field_groups:
+            for group_index, (_title, group_fields) in enumerate(self._field_groups):
+                self._layout.addWidget(
+                    self._group_headings[group_index], row, 0, 1, columns
+                )
+                row += 1
+                for index, field in enumerate(group_fields):
+                    self._layout.addWidget(
+                        field, row + index // columns, index % columns
+                    )
+                row += (len(group_fields) + columns - 1) // columns
+        else:
+            for index, field in enumerate(self._fields):
+                self._layout.addWidget(field, row + index // columns, index % columns)
 
     def add_stretch(self) -> None:
         """Compatibility helper; grid rows already use only the needed height."""
@@ -286,11 +324,26 @@ class FieldWidget(QWidget):
         self._base_tooltip = tooltip
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0 if compact else _sp(2), 0, 0 if compact else _sp(2))
-        layout.setSpacing(_sp(4 if compact else 8))
+        layout.setContentsMargins(
+            0, _sp(SPACING.xsmall if compact else SPACING.small),
+            0, _sp(SPACING.xsmall if compact else SPACING.small),
+        )
+        layout.setSpacing(_sp(SPACING.xsmall if compact else SPACING.small))
 
-        prefix = "🚗 " if self._field_kind == "vin" else "🔢 " if self._field_kind == "reg" else ""
-        label = QLabel(f"{prefix}{display_name}:", self)
+        if self._field_kind in {"vin", "reg"}:
+            icon_label = QLabel(self)
+            icon_kind = (
+                QStyle.StandardPixmap.SP_ComputerIcon
+                if self._field_kind == "vin"
+                else QStyle.StandardPixmap.SP_FileIcon
+            )
+            icon = self.style().standardIcon(icon_kind)
+            icon_label.setPixmap(icon.pixmap(_sp(16), _sp(16)))
+            icon_label.setAccessibleName("VIN field" if self._field_kind == "vin" else "Registration field")
+            icon_label.setFixedSize(_sp(18), _sp(18))
+            layout.addWidget(icon_label)
+
+        label = QLabel(f"{display_name}:", self)
         # Kompakt formulärläge får plats i flera kolumner utan att röra fältvärden.
         label.setMinimumWidth(_sp(88 if compact else 150))
         label.setMaximumWidth(_sp(165 if compact else 230))
@@ -300,7 +353,9 @@ class FieldWidget(QWidget):
 
         self._entry = QLineEdit(self)
         self._entry.setText(default_value)
-        self._entry.setMinimumHeight(_sp(22 if compact else 32))
+        self._entry.setMinimumHeight(
+            _sp(SHAPE.control_height - 4 if compact else SHAPE.control_height)
+        )
         self._entry.setAccessibleName(display_name)
         self._entry.setToolTip(tooltip)
         self._entry.textChanged.connect(self._on_text_changed)

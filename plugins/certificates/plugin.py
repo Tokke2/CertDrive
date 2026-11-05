@@ -30,6 +30,7 @@ Uppgradering 10.0.0 → 10.1.0 ("188888888% bättre", endast denna fil)
 """
 
 import csv
+import html
 import json
 import logging
 import shutil
@@ -57,21 +58,26 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QSizePolicy,
     QStyle,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
 
+from core.design_tokens import SHAPE, SPACING, scaled
 from . import labels as _labels
 from . import bpac_setup as _bpac_setup
 from .counter_security import CounterPinStore
 from .customers import Customer, load_customers, save_customers
 from .history import find_duplicate_certificates, registration_from_values, vin_from_values
 from .label_mappings import load_label_mappings, save_label_mappings
+from .layout import field_group
 from .printer_settings import (
     default_printer,
     installed_printers,
@@ -550,7 +556,7 @@ class Plugin:
             if app is not None:
                 height = app.fontMetrics().height()
                 if height > 0:
-                    return max(base, int(round(base * height / 16.0)))
+                    return scaled(base, height, minimum=base)
         except Exception:
             pass
         return base
@@ -1288,8 +1294,11 @@ class Plugin:
         root.setObjectName("CertificatesTab")
         root.csv_dropped.connect(self._handle_batch_drop)
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(self._sp(6), self._sp(6), self._sp(6), self._sp(6))
-        outer.setSpacing(self._sp(4))
+        outer.setContentsMargins(
+            self._sp(SPACING.small), self._sp(SPACING.small),
+            self._sp(SPACING.small), self._sp(SPACING.small),
+        )
+        outer.setSpacing(self._sp(SPACING.medium))
         outer.addWidget(self._build_status_row())
         outer.addWidget(self._build_template_selector())
         outer.addWidget(self._build_label_mapping_row())
@@ -1318,19 +1327,32 @@ class Plugin:
     def _build_template_selector(self) -> QWidget:
         frame = QFrame()
         frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setProperty("designSurface", True)
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(self._sp(4), self._sp(1), self._sp(4), self._sp(1))
-        layout.setSpacing(self._sp(4))
+        layout.setContentsMargins(
+            self._sp(SPACING.medium), self._sp(SPACING.small),
+            self._sp(SPACING.medium), self._sp(SPACING.small),
+        )
+        layout.setSpacing(self._sp(SPACING.small))
         layout.addWidget(QLabel("📁 Mall:", frame))
 
         self._template_combo = QComboBox(frame)
-        self._template_combo.setMinimumWidth(self._sp(280))
-        self._template_combo.setMinimumHeight(self._sp(24))
+        self._template_combo.setMinimumWidth(self._sp(180))
+        self._template_combo.setMinimumHeight(self._sp(32))
         self._template_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._template_combo.addItem("Skannar mallar…")
         self._template_combo.setEnabled(False)
         self._template_combo.currentTextChanged.connect(self._on_template_selected)
         layout.addWidget(self._template_combo, stretch=1)
+
+        gallery = QPushButton("Galleri", frame)
+        gallery.setIcon(self._standard_icon("SP_FileDialogDetailedView"))
+        gallery.setIconSize(QSize(self._sp(16), self._sp(16)))
+        gallery.setMinimumHeight(self._sp(32))
+        gallery.setToolTip("Visa mallar med beskrivning och fältöversikt")
+        gallery.clicked.connect(self._open_template_gallery)
+        layout.addWidget(gallery)
+        self._template_gallery_button = gallery
 
         refresh = QPushButton(frame)
         refresh.setIcon(self._standard_icon("SP_BrowserReload"))
@@ -1349,12 +1371,109 @@ class Plugin:
         layout.addWidget(open_templates)
         return frame
 
+    def _open_template_gallery(self) -> None:
+        """Show available templates as a searchable-by-eye metadata gallery."""
+        combo = self._template_combo
+        if combo is None:
+            return
+        with self._templates_lock:
+            templates = sorted(self._templates.items(), key=lambda item: item[0].casefold())
+        if not templates:
+            return
+
+        dialog = QDialog(self._tab_widget)
+        dialog.setWindowTitle("Mallgalleri")
+        dialog.resize(self._sp(760), self._sp(520))
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(self._sp(16), self._sp(16), self._sp(16), self._sp(16))
+        root.setSpacing(self._sp(10))
+        intro = QLabel("Välj en mall och granska dess beskrivning och fält.", dialog)
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        content = QHBoxLayout()
+        content.setSpacing(self._sp(12))
+        gallery_list = QListWidget(dialog)
+        gallery_list.setMinimumWidth(self._sp(250))
+        details = QTextBrowser(dialog)
+        details.setOpenExternalLinks(False)
+        content.addWidget(gallery_list, stretch=1)
+        content.addWidget(details, stretch=2)
+        root.addLayout(content, stretch=1)
+
+        for name, template in templates:
+            config = _safe_get(template, "config", None)
+            category = str(_safe_get(config, "category", "") or "Mall")
+            fields = _template_user_fields(template)
+            item = QListWidgetItem(f"{name}\n{category} · {len(fields)} fält", gallery_list)
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            item.setToolTip(name)
+
+        def show_details(item: QListWidgetItem | None) -> None:
+            if item is None:
+                details.clear()
+                return
+            name = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            template = dict(templates).get(name)
+            if template is None:
+                details.clear()
+                return
+            config = _safe_get(template, "config", None)
+            category = str(_safe_get(config, "category", "") or "Ei määritelty")
+            description = ""
+            for attribute in ("description", "beskrivning", "summary"):
+                description = str(_safe_get(config, attribute, "") or "").strip()
+                if description:
+                    break
+            if not description:
+                description = "Tälle mallille ei ole lisätty erillistä kuvausta."
+            fields = _template_user_fields(template)
+            docx_name = Path(str(_safe_get(template, "docx_file", ""))).name or "DOCX-fil saknas"
+            field_html = "<li>" + "</li><li>".join(html.escape(value) for value in fields) + "</li>" if fields else "<li>Inga manuella fält</li>"
+            details.setHtml(
+                "<h2>" + html.escape(name) + "</h2>"
+                + "<p><b>Kategori:</b> " + html.escape(category) + "</p>"
+                + "<p>" + html.escape(description) + "</p>"
+                + "<p><b>Dokument:</b> " + html.escape(docx_name) + "</p>"
+                + f"<p><b>Bilagor:</b> {_template_attachments(template)}</p>"
+                + "<h3>Fält</h3><ul>" + field_html + "</ul>"
+                + "<p><i>Dokumentets visuella förhandsvisning är inte tillgänglig i den här vyn.</i></p>"
+            )
+
+        gallery_list.currentItemChanged.connect(show_details)
+        gallery_list.itemDoubleClicked.connect(lambda _item: dialog.accept())
+        current_name = combo.currentText()
+        for index in range(gallery_list.count()):
+            item = gallery_list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == current_name:
+                gallery_list.setCurrentItem(item)
+                break
+        if gallery_list.currentItem() is None:
+            gallery_list.setCurrentRow(0)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Open | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Open).setText("Välj mall")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        root.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected = gallery_list.currentItem()
+            if selected is not None:
+                combo.setCurrentText(str(selected.data(Qt.ItemDataRole.UserRole) or ""))
+
     def _build_label_mapping_row(self) -> QWidget:
         frame = QFrame()
         frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setProperty("designSurface", True)
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(self._sp(4), self._sp(1), self._sp(4), self._sp(1))
-        layout.setSpacing(self._sp(4))
+        layout.setContentsMargins(
+            self._sp(SPACING.medium), self._sp(SPACING.small),
+            self._sp(SPACING.medium), self._sp(SPACING.small),
+        )
+        layout.setSpacing(self._sp(SPACING.small))
         layout.addWidget(QLabel("🏷️ Etikett för intygsmall:", frame))
         self._label_mapping_combo = QComboBox(frame)
         self._label_mapping_combo.setMinimumHeight(self._sp(23))
@@ -1804,8 +1923,12 @@ class Plugin:
     def _build_template_info(self) -> QWidget:
         frame = QFrame()
         frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setProperty("designSurface", True)
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(self._sp(4), self._sp(1), self._sp(4), self._sp(1))
+        layout.setContentsMargins(
+            self._sp(SPACING.medium), self._sp(SPACING.small),
+            self._sp(SPACING.medium), self._sp(SPACING.small),
+        )
         self._info_label = QLabel("Välj en mall för att se dess information.", frame)
         self._info_label.setWordWrap(True)
         layout.addWidget(self._info_label, stretch=1)
@@ -1818,10 +1941,15 @@ class Plugin:
     def _build_fields_section(self) -> QWidget:
         frame = QFrame()
         frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setProperty("designSurface", True)
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(self._sp(4), self._sp(3), self._sp(4), self._sp(3))
-        layout.setSpacing(self._sp(2))
-        title = QLabel("✏️ Uppgifter", frame)
+        layout.setContentsMargins(
+            self._sp(SPACING.medium), self._sp(SPACING.small),
+            self._sp(SPACING.medium), self._sp(SPACING.small),
+        )
+        layout.setSpacing(self._sp(SPACING.small))
+        title = QLabel("Uppgifter", frame)
+        title.setProperty("uiRole", "sectionTitle")
         title_font = title.font()
         title_font.setBold(True)
         title.setFont(title_font)
@@ -1835,19 +1963,24 @@ class Plugin:
     def _build_action_row(self) -> QWidget:
         """Keep every action reachable on narrow and high-DPI windows."""
         frame = QFrame()
+        frame.setProperty("designSurface", True)
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(0, self._sp(2), 0, 0)
-        layout.setSpacing(self._sp(2))
+        layout.setContentsMargins(
+            self._sp(SPACING.medium), self._sp(SPACING.small),
+            self._sp(SPACING.medium), self._sp(SPACING.small),
+        )
+        layout.setSpacing(self._sp(SPACING.small))
 
         buttons = QGridLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
-        buttons.setHorizontalSpacing(self._sp(4))
-        buttons.setVerticalSpacing(self._sp(0))
+        buttons.setHorizontalSpacing(self._sp(SPACING.small))
+        buttons.setVerticalSpacing(self._sp(SPACING.xsmall))
 
         self._generate_button = QPushButton("Generera PDF", frame)
+        self._generate_button.setProperty("uiRole", "primary")
         self._generate_button.setIcon(self._standard_icon("SP_DialogSaveButton"))
         self._generate_button.setIconSize(QSize(self._sp(16), self._sp(16)))
-        self._generate_button.setMinimumHeight(self._sp(25))
+        self._generate_button.setMinimumHeight(self._sp(SHAPE.control_height))
         self._generate_button.setToolTip("Generera intyg (Ctrl+G)")
         self._generate_button.clicked.connect(self._on_generate)
         buttons.addWidget(self._generate_button, 0, 0)
@@ -1855,7 +1988,7 @@ class Plugin:
         self._batch_button = QPushButton("Batch", frame)
         self._batch_button.setIcon(self._standard_icon("SP_FileDialogListView"))
         self._batch_button.setIconSize(QSize(self._sp(16), self._sp(16)))
-        self._batch_button.setMinimumHeight(self._sp(25))
+        self._batch_button.setMinimumHeight(self._sp(SHAPE.control_height))
         self._batch_button.setToolTip("Batch-generering från CSV")
         self._batch_button.clicked.connect(self._on_batch_generate)
         buttons.addWidget(self._batch_button, 0, 1)
@@ -1863,7 +1996,7 @@ class Plugin:
         output = QPushButton("Output", frame)
         output.setIcon(self._standard_icon("SP_DirOpenIcon"))
         output.setIconSize(QSize(self._sp(16), self._sp(16)))
-        output.setMinimumHeight(self._sp(25))
+        output.setMinimumHeight(self._sp(SHAPE.control_height))
         output.setToolTip("Öppna outputmapp (Ctrl+O)")
         output.clicked.connect(self._open_output_folder)
         buttons.addWidget(output, 0, 2)
@@ -1871,7 +2004,7 @@ class Plugin:
         clear = QPushButton("Rensa", frame)
         clear.setIcon(self._standard_icon("SP_TrashIcon"))
         clear.setIconSize(QSize(self._sp(16), self._sp(16)))
-        clear.setMinimumHeight(self._sp(25))
+        clear.setMinimumHeight(self._sp(SHAPE.control_height))
         clear.setToolTip("Rensa fält (Ctrl+L)")
         clear.clicked.connect(self._clear_fields)
         buttons.addWidget(clear, 0, 3)
@@ -1879,7 +2012,7 @@ class Plugin:
         imported = QPushButton("Import", frame)
         imported.setIcon(self._standard_icon("SP_DialogOpenButton"))
         imported.setIconSize(QSize(self._sp(16), self._sp(16)))
-        imported.setMinimumHeight(self._sp(25))
+        imported.setMinimumHeight(self._sp(SHAPE.control_height))
         imported.setToolTip("Importera befintliga PDF-intyg (Ctrl+I)")
         imported.clicked.connect(self._import_certificates)
         buttons.addWidget(imported, 0, 4)
@@ -1944,6 +2077,9 @@ class Plugin:
         finally:
             combo.blockSignals(False)
         self._pending_combo_update = False
+        gallery_button = getattr(self, "_template_gallery_button", None)
+        if gallery_button is not None:
+            gallery_button.setEnabled(bool(names))
         self._evt("cert.combo_updated", f"Mallcombo uppdaterad: {len(names)} mallar",
                   level=logging.DEBUG, count=len(names))
         if names:
@@ -2072,7 +2208,7 @@ class Plugin:
         fields = _template_user_fields(template)
         automatic_count = sum(1 for field_name in placeholders if _is_auto_field(field_name))
         if self._fields_title is not None:
-            title = f"✏️ Uppgifter · {len(fields)} fält"
+            title = f"Uppgifter · {len(fields)} fält"
             if automatic_count:
                 title += f" · {automatic_count} automatiska"
             self._fields_title.setText(title)
@@ -2087,6 +2223,7 @@ class Plugin:
             self._fit_fields_area()
             return
 
+        grouped_fields: dict[str, list[FieldWidget]] = {}
         for field_name in fields:
             upper = field_name.upper()
             kind = "vin" if upper in {"VIN", "VINNUMMER", "CHASSI", "CHASSINUMMER"} else "reg" if upper in {"REG", "REGNR", "REGISTRERINGSNUMMER"} else ""
@@ -2110,7 +2247,8 @@ class Plugin:
             )
             field.value_changed.connect(self._on_field_value_changed)
             self._field_widgets.append(field)
-        area.set_content(fields=list(self._field_widgets))
+            grouped_fields.setdefault(field_group(field_name), []).append(field)
+        area.set_content(field_groups=list(grouped_fields.items()))
         self._evt("cert.fields_built", f"{len(self._field_widgets)} fält byggda",
                   level=logging.DEBUG, fields=len(self._field_widgets),
                   auto=automatic_count, placeholders=len(placeholders))
@@ -2147,7 +2285,7 @@ class Plugin:
 
     def _clear_template_view(self) -> None:
         if self._fields_title is not None:
-            self._fields_title.setText("✏️ Uppgifter")
+            self._fields_title.setText("Uppgifter")
         if self._info_label is not None:
             self._info_label.setText("Ingen giltig mall är vald.")
         if self._counter_label is not None:

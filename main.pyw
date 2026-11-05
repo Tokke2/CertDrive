@@ -841,6 +841,7 @@ class _TabRecord:
     widget: QWidget
     icon: QIcon
     visible: bool = True
+    loaded: bool = True
 
 
 class MainWindow(QMainWindow):
@@ -874,6 +875,7 @@ class MainWindow(QMainWindow):
         self._recent_activity_layout: QVBoxLayout | None = None
         self._keyboard_shortcuts: list[QShortcut] = []
         self._syncing_tabs = False
+        self._tab_mount_pending = False
 
         self.show_signal.connect(self._on_show)
         self.hide_signal.connect(self._on_hide)
@@ -1118,8 +1120,12 @@ class MainWindow(QMainWindow):
             self._show_plugin_error("Pluginhanteraren är inte tillgänglig.")
             return
 
+        lazy_listing = callable(getattr(manager, "get_tab_names", None))
         try:
-            plugin_tabs = manager.get_tabs()
+            if lazy_listing:
+                plugin_tabs = [(name, None) for name in manager.get_tab_names()]
+            else:
+                plugin_tabs = manager.get_tabs()
         except Exception:
             _logger.exception("Kunde inte hämta pluginflikar")
             self._show_plugin_error("Pluginflikarna kunde inte laddas. Se loggarna.")
@@ -1129,10 +1135,16 @@ class MainWindow(QMainWindow):
         seen_names: set[str] = set()
         for raw_name, widget in plugin_tabs:
             name = str(raw_name).strip() or "Plugin"
-            if name in seen_names or not isinstance(widget, QWidget):
+            if name in seen_names or (
+                widget is not None and not isinstance(widget, QWidget)
+            ):
                 continue
             seen_names.add(name)
-            records.append(_TabRecord(name, widget, self._tab_icon(name)))
+            loaded = widget is not None
+            tab_widget = widget if loaded else self._make_lazy_tab_placeholder(name)
+            records.append(
+                _TabRecord(name, tab_widget, self._tab_icon(name), loaded=loaded)
+            )
 
         self._tab_records = records
         self._hidden_tabs = self._load_hidden_tabs() & seen_names
@@ -1215,6 +1227,78 @@ class MainWindow(QMainWindow):
             elif not visible_records and current_name not in {"", "Start"}:
                 index_to_select = 0
             self._tabs.setCurrentIndex(index_to_select)
+        finally:
+            self._syncing_tabs = False
+        self._queue_selected_plugin_tab_mount()
+
+    def _make_lazy_tab_placeholder(self, name: str) -> QWidget:
+        """Create a cheap tab surface; the plugin widget is built on first use."""
+        page = QWidget(self._tabs)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(_scale(24), _scale(24), _scale(24), _scale(24))
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        message = QLabel(
+            f"{name} öppnas när du väljer fliken.",
+            page,
+        )
+        message.setObjectName("lazyTabMessage")
+        message.setWordWrap(True)
+        message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        message.setAccessibleName(f"{name} väntar på att öppnas")
+        layout.addWidget(message)
+        return page
+
+    def _queue_selected_plugin_tab_mount(self) -> None:
+        """Allow the loading state to paint before a deferred widget is built."""
+        if self._tabs is None or self._tab_mount_pending:
+            return
+        selected = self._current_tab_name()
+        if not any(
+            item.name == selected and not item.loaded for item in self._tab_records
+        ):
+            return
+        self._tab_mount_pending = True
+        QTimer.singleShot(0, self._mount_selected_plugin_tab)
+
+    def _mount_selected_plugin_tab(self) -> None:
+        """Construct and replace the current plugin's placeholder exactly once."""
+        self._tab_mount_pending = False
+        if self._tabs is None:
+            return
+        selected = self._current_tab_name()
+        record = next((item for item in self._tab_records if item.name == selected), None)
+        if record is None or record.loaded:
+            return
+        message = record.widget.findChild(QLabel, "lazyTabMessage")
+        if message is not None:
+            message.setText(f"Laddar {record.name}…")
+        manager = self._app.plugin_manager
+        get_tab = getattr(manager, "get_tab", None) if manager is not None else None
+        try:
+            widget = get_tab(record.name) if callable(get_tab) else None
+        except Exception:
+            _logger.exception("Kunde inte bygga pluginfliken '%s'", record.name)
+            widget = None
+        if not isinstance(widget, QWidget):
+            record.loaded = True
+            if message is not None:
+                message.setText(f"Fliken {record.name} kunde inte laddas. Se loggarna.")
+            return
+
+        index = self._tabs.indexOf(record.widget)
+        if index < 0:
+            record.loaded = True
+            record.widget = widget
+            return
+        self._syncing_tabs = True
+        try:
+            previous = record.widget
+            self._tabs.removeTab(index)
+            previous.deleteLater()
+            record.widget = widget
+            record.loaded = True
+            self._tabs.insertTab(index, widget, record.icon, record.name)
+            self._tabs.setCurrentIndex(index)
         finally:
             self._syncing_tabs = False
 
@@ -1384,6 +1468,7 @@ class MainWindow(QMainWindow):
     def _on_tab_changed(self, index: int) -> None:
         if index >= 0 and not self._syncing_tabs:
             self._remember_current_tab()
+            self._queue_selected_plugin_tab_mount()
         if self._tabs is not None and self._tabs.currentWidget() is self._home_tab:
             self._refresh_recent_activity()
         self._refresh_statusbar()

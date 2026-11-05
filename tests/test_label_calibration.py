@@ -106,6 +106,31 @@ class LabelCalibrationTests(unittest.TestCase):
         self.assertNotIn("Sensitive customer value", repr(document.texts))
         self.assertEqual(result.filled, ["text_1", "text_2", "text_3"])
 
+    def test_calibration_accepts_bpac_text_count_as_integer_property(self):
+        document = _FakeDocument(text_count=2)
+        # Some b-PAC COM wrappers expose this member as a value, not a method.
+        document.GetTextCount = 2
+        pythoncom = types.ModuleType("pythoncom")
+        pythoncom.CoInitialize = lambda: None
+        pythoncom.CoUninitialize = lambda: None
+        client = types.ModuleType("win32com.client")
+        client.Dispatch = lambda _progid: document
+        win32com = types.ModuleType("win32com")
+        win32com.__path__ = []
+        win32com.client = client
+
+        with tempfile.TemporaryDirectory() as directory:
+            label_path = Path(directory) / "property-count.lbx"
+            label_path.touch()
+            with mock.patch.object(_LABELS.sys, "platform", "win32"), mock.patch.dict(
+                sys.modules,
+                {"pythoncom": pythoncom, "win32com": win32com, "win32com.client": client},
+            ):
+                result = _LABELS.print_label(label_path, calibration=True)
+
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(document.texts, [(0, "01|0123456789|"), (1, "02|0123456789|")])
+
     def test_bpac_printout_failure_is_reported_instead_of_false_success(self):
         document = _FakeDocument(print_result=False)
         pythoncom = types.ModuleType("pythoncom")

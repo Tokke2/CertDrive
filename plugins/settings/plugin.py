@@ -469,12 +469,13 @@ class Plugin:
             except Exception:
                 _logger.exception("[SETTINGS] Kunde inte hämta applogger")
         self._setup_paths()
-        self._theme_manager = ThemeManager()
+        self._theme_manager = ThemeManager.get_instance(context)
         self._shortcut_manager = ShortcutManager(self._settings_provider())
         self._ensure_defaults()
         self._load_profiles()
         self._subscribe_events()
         self._apply_saved_theme()
+        self._apply_font_size(self.get_setting("general.font_size", 10))
         self._sync_autostart()
         self._sync_tray()
         self._loaded = True
@@ -691,11 +692,18 @@ class Plugin:
         if self._theme_manager is not None:
             self._theme_manager.apply_theme(Theme.from_string(str(self.get_setting("general.theme", "system"))))
 
-    def _apply_font_size(self, size: int) -> None:
+    def _apply_font_size(self, size: Any) -> None:
+        try:
+            normalized = max(8, min(18, int(size)))
+        except (TypeError, ValueError):
+            normalized = 10
+        if self._theme_manager is not None:
+            self._theme_manager.set_font_size(normalized)
+            return
         app = QApplication.instance()
         if app is not None:
             font = app.font()
-            font.setPointSize(max(8, min(18, size)))
+            font.setPointSize(normalized)
             app.setFont(font)
 
     def _sync_autostart(self) -> None:

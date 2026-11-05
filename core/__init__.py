@@ -1163,42 +1163,59 @@ class PluginManager:
             return fallback
         return fallback
 
+    def get_tab_names(self) -> list[str]:
+        """List plugins with tab factories without constructing their widgets."""
+        return [
+            name
+            for name in self._order
+            if (plugin := self.loaded.get(name)) is not None
+            and getattr(plugin, "has_tab", True) is not False
+            and callable(getattr(plugin, "get_tab", None))
+        ]
+
+    def get_tab(self, name: str) -> Any | None:
+        """Construct one plugin tab on demand and record its build duration."""
+        plugin = self.loaded.get(name)
+        get_tab_fn = getattr(plugin, "get_tab", None) if plugin is not None else None
+        if not callable(get_tab_fn):
+            return None
+        started = time.monotonic()
+        try:
+            tab = get_tab_fn()
+        except Exception:
+            elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+            self._logger.exception(
+                "[PluginManager] get_tab() failed for '%s' (%.1f ms)",
+                name,
+                elapsed_ms,
+                extra={"event": "plugin.tab_build_failed", "ctx": {"plugin": name, "ms": elapsed_ms}},
+            )
+            return None
+        elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+        self._logger.info(
+            "[PluginManager] get_tab() for '%s' completed in %.1f ms",
+            name,
+            elapsed_ms,
+            extra={"event": "plugin.tab_built", "ctx": {"plugin": name, "ms": elapsed_ms}},
+        )
+        return tab
+
     def get_tabs(self) -> list[tuple[str, Any]]:
-        """Hämta UI-tabbar från alla laddade plugins."""
+        """Compatibility API: construct and return every available plugin tab."""
         tabs: list[tuple[str, Any]] = []
-
-        for name in self._order:
-            plugin = self.loaded.get(name)
-            if plugin is None:
+        for name in self.get_tab_names():
+            tab = self.get_tab(name)
+            if tab is None:
                 continue
+            with suppress(ImportError):
+                from PySide6.QtWidgets import QWidget
 
-            get_tab_fn = getattr(plugin, "get_tab", None)
-            if not callable(get_tab_fn):
-                continue
-
-            try:
-                tab = get_tab_fn()
-                if tab is None:
+                if not isinstance(tab, QWidget):
+                    self._logger.debug(
+                        "Tab '%s' ignorerad — inte QWidget (%s)", name, type(tab).__name__
+                    )
                     continue
-
-                with suppress(ImportError):
-                    from PySide6.QtWidgets import QWidget
-
-                    if not isinstance(tab, QWidget):
-                        self._logger.debug(
-                            "Tab '%s' ignorerad — inte QWidget (%s)",
-                            name,
-                            type(tab).__name__,
-                        )
-                        continue
-
-                tabs.append((name, tab))
-            except Exception as exc:
-                self._logger.warning(
-                    "get_tab() fel för '%s': %s", name, exc
-                )
-                traceback.print_exc()
-
+            tabs.append((name, tab))
         self._logger.info("Created %d UI tabs", len(tabs))
         return tabs
 
