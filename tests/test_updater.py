@@ -3,12 +3,13 @@ import json
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 
 from core import APP_DISPLAY_NAME, __version__ as app_version
 from core.updater import (
     ReleaseUpdate,
+    _is_runtime_path,
     _version_key,
     approve_staged_update,
     check_latest_release,
@@ -216,6 +217,18 @@ class AutomaticUpdateStagingTests(unittest.TestCase):
             self.assertFalse(result.staged)
             self.assertEqual(get_current_commit(root), "f" * 40)
             self.assertFalse((root / "js" / ".update-staging" / "pending.json").exists())
+
+    def test_weekly_python_manifest_and_task_script_are_allowlisted(self):
+        self.assertTrue(_is_runtime_path(PurePosixPath("requirements.txt")))
+        self.assertTrue(
+            _is_runtime_path(PurePosixPath("core/python_weekly_update.ps1"))
+        )
+        self.assertTrue(
+            _is_runtime_path(PurePosixPath("core/python_weekly_task.py"))
+        )
+        self.assertFalse(
+            _is_runtime_path(PurePosixPath("plugins/unexpected_installer.ps1"))
+        )
 
     def test_archive_paths_cannot_escape_runtime_allowlist(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -1,0 +1,12 @@
+# Direct Python dependencies used by IntygsDrive; the weekly maintenance task
+# upgrades only these packages in Python Install Manager's default system runtime.
+PySide6
+Pillow
+PyPDF2
+openpyxl
+psutil
+pypdf
+python-docx
+reportlab
+docx2pdf; platform_system == "Windows" or platform_system == "Darwin"
+pywin32; platform_system == "Windows"

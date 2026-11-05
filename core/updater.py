@@ -33,7 +33,8 @@ _STATE_NAME = "update_state.json"
 _PENDING_NAME = "pending.json"
 _APPROVED_NAME = "approved.json"
 _RUNTIME_DIRS = frozenset({"core", "plugins", "Icon"})
-_RUNTIME_ROOT_FILES = frozenset({"main.pyw", "main_guards.py"})
+_RUNTIME_ROOT_FILES = frozenset({"main.pyw", "main_guards.py", "requirements.txt"})
+_RUNTIME_EXACT_FILES = frozenset({"core/python_weekly_update.ps1"})
 _RUNTIME_SUFFIXES = frozenset({".py", ".pyw", ".svg", ".png", ".ico"})
 
 
@@ -166,10 +167,14 @@ def _is_runtime_path(relative: PurePosixPath) -> bool:
         for part in relative.parts
     ):
         return False
-    if "__pycache__" in relative.parts or relative.suffix.casefold() not in _RUNTIME_SUFFIXES:
+    if relative.as_posix() in _RUNTIME_EXACT_FILES:
+        return True
+    if "__pycache__" in relative.parts:
         return False
     if len(relative.parts) == 1:
         return relative.name in _RUNTIME_ROOT_FILES
+    if relative.suffix.casefold() not in _RUNTIME_SUFFIXES:
+        return False
     return relative.parts[0] in _RUNTIME_DIRS
 
 
