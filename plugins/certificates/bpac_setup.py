@@ -194,14 +194,68 @@ $template = $db.SummaryInformation(0).Property(7)
     return validate_bpac_signature_report(report)
 
 
-def launch_bpac_msi_as_admin(path: Path | str) -> tuple[bool, str]:
-    """Run the selected MSI through Windows Installer with an explicit UAC prompt."""
+def launch_bpac_msi_as_admin(
+    path: Path | str,
+    *,
+    app_root: Path | str | None = None,
+    parent_pid: int | None = None,
+) -> tuple[bool, str]:
+    """Run the MSI with UAC and optionally relaunch IntygsDrive after it finishes."""
     if sys.platform != "win32":
         return False, "b-PAC kan bara installeras på Windows."
     installer = Path(path).resolve()
     if installer.suffix.casefold() != ".msi" or not installer.is_file():
         return False, "Installationsfilen saknas eller är inte en MSI-fil."
     windows = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    if app_root is not None and parent_pid is not None:
+        root = Path(app_root).resolve()
+        helper = root / "core" / "bpac_install_helper.ps1"
+        main_script = root / "main.pyw"
+        powershell = windows / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        if not helper.is_file() or not main_script.is_file():
+            return False, "Installationshjälparen eller IntygsDrives startfil saknas."
+        if not powershell.is_file():
+            return False, "Windows PowerShell hittades inte."
+        command = [
+            str(powershell),
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+            str(helper),
+            str(installer),
+            sys.executable,
+            str(main_script),
+            str(root),
+            str(int(parent_pid)),
+        ]
+        creationflags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+        try:
+            subprocess.Popen(
+                command,
+                cwd=str(root),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=creationflags,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"Installationshjälparen kunde inte startas: {type(exc).__name__}."
+        return True, (
+            "Installationshjälparen startades. IntygsDrive stängs nu och öppnas igen "
+            "när Windows-installationen är klar."
+        )
+
+    # Backward-compatible direct launch for callers that do not request a restart.
     msiexec = windows / "System32" / "msiexec.exe"
     if not msiexec.is_file():
         return False, "Windows Installer (msiexec.exe) hittades inte."

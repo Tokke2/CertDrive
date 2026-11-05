@@ -2648,7 +2648,16 @@ class Plugin:
         if confirm.clickedButton() is not start_button:
             return
 
-        launched, message = _bpac_setup.launch_bpac_msi_as_admin(installer_path)
+        app_root = (
+            self._context.base_path
+            if self._context is not None
+            else Path(__file__).resolve().parents[2]
+        )
+        launched, message = _bpac_setup.launch_bpac_msi_as_admin(
+            installer_path,
+            app_root=app_root,
+            parent_pid=int(QApplication.applicationPid()),
+        )
         if not launched:
             self._evt("label.bpac_installer_start_failed", "b-PAC-installationen startade inte",
                       level=logging.WARNING, reason=message)
@@ -2664,9 +2673,11 @@ class Plugin:
         QMessageBox.information(
             parent,
             "b-PAC-installationen startad",
-            "Slutför Windows-installationen. Starta sedan om IntygsDrive "
-            "för att aktivera b-PAC-utskriften.",
+            "IntygsDrive stängs nu så att b-PAC kan uppdateras. Appen startas "
+            "automatiskt igen när Windows-installationen är klar. Om du avbryter "
+            "UAC startar appen ändå igen utan att b-PAC installeras.",
         )
+        self._emit_event("app.quit", {"reason": "bpac_installation"})
 
     # ── Etikettutskrift (QL-500 via b-PAC) ────────────────────────────────
 

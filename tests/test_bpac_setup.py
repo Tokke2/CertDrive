@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -147,6 +148,49 @@ class BpacSetupTests(unittest.TestCase):
             sys.modules, {"winreg": winreg}
         ):
             self.assertEqual(_SETUP.installed_bpac_version(), "3.4.016")
+
+    def test_restart_install_launches_detached_powershell_helper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "app root"
+            helper = root / "core" / "bpac_install_helper.ps1"
+            helper.parent.mkdir(parents=True)
+            helper.touch()
+            main_script = root / "main.pyw"
+            main_script.touch()
+            installer = Path(directory) / "Brother b-PAC.msi"
+            installer.touch()
+            windows = Path(directory) / "Windows"
+            powershell = windows / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            powershell.parent.mkdir(parents=True)
+            powershell.touch()
+            with (
+                patch.object(_SETUP.sys, "platform", "win32"),
+                patch.dict("os.environ", {"WINDIR": str(windows)}),
+                patch.object(_SETUP.subprocess, "Popen") as launch,
+            ):
+                started, message = _SETUP.launch_bpac_msi_as_admin(
+                    installer, app_root=root, parent_pid=12345
+                )
+
+        self.assertTrue(started, message)
+        command = launch.call_args.args[0]
+        self.assertIn(str(helper), command)
+        self.assertIn(str(installer), command)
+        self.assertEqual(command[-1], "12345")
+        self.assertIn("öppnas igen", message)
+        self.assertTrue(launch.call_args.kwargs["close_fds"])
+
+    def test_post_install_helper_requires_uac_and_restarts_without_silent_install(self):
+        helper = (
+            Path(__file__).resolve().parents[1]
+            / "core"
+            / "bpac_install_helper.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn("-Verb RunAs -Wait -PassThru", helper)
+        self.assertIn("/i \"", helper)
+        self.assertIn("Start-Process -FilePath $PythonPath", helper)
+        self.assertNotIn("/qn", helper.casefold())
+        self.assertIn("UAC cancellation", helper)
 
     def test_installer_operations_are_rejected_off_windows(self):
         with patch.object(_SETUP.sys, "platform", "linux"):
