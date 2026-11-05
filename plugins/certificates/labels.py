@@ -197,7 +197,11 @@ def print_label(
             raise RuntimeError(f"b-PAC kunde inte starta utskriften (felkod {error_code})")
         stage = "skicka jobbet till skrivaren"
         print_result = document.PrintOut(copies, _BPAC_PRINT_DEFAULT)
-        end_result = document.EndPrint()
+        stage = "avsluta utskriftsjobbet"
+        end_print_member = getattr(document, "EndPrint", None)
+        # Some b-PAC COM wrappers expose EndPrint as a boolean result property
+        # instead of a zero-argument method.
+        end_result = end_print_member() if callable(end_print_member) else end_print_member
         if print_result is not None and not bool(print_result):
             error_code = getattr(document, "ErrorCode", "okänd")
             raise RuntimeError(f"b-PAC kunde inte skicka jobbet till skrivaren (felkod {error_code})")

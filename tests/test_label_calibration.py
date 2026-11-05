@@ -131,6 +131,31 @@ class LabelCalibrationTests(unittest.TestCase):
         self.assertTrue(result.ok, result.error)
         self.assertEqual(document.texts, [(0, "01|0123456789|"), (1, "02|0123456789|")])
 
+    def test_end_print_boolean_property_does_not_get_called(self):
+        document = _FakeDocument()
+        # Some wrappers expose EndPrint as its boolean result rather than a method.
+        document.EndPrint = True
+        pythoncom = types.ModuleType("pythoncom")
+        pythoncom.CoInitialize = lambda: None
+        pythoncom.CoUninitialize = lambda: None
+        client = types.ModuleType("win32com.client")
+        client.Dispatch = lambda _progid: document
+        win32com = types.ModuleType("win32com")
+        win32com.__path__ = []
+        win32com.client = client
+
+        with tempfile.TemporaryDirectory() as directory:
+            label_path = Path(directory) / "end-print-property.lbx"
+            label_path.touch()
+            with mock.patch.object(_LABELS.sys, "platform", "win32"), mock.patch.dict(
+                sys.modules,
+                {"pythoncom": pythoncom, "win32com": win32com, "win32com.client": client},
+            ):
+                result = _LABELS.print_label(label_path)
+
+        self.assertTrue(result.ok, result.error)
+        self.assertTrue(document.printed)
+
     def test_bpac_printout_failure_is_reported_instead_of_false_success(self):
         document = _FakeDocument(print_result=False)
         pythoncom = types.ModuleType("pythoncom")
