@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -32,6 +33,7 @@ class BpacSetupTests(unittest.TestCase):
                 "Status": "Valid",
                 "Subject": "CN=Brother Industries, Ltd., O=Brother Industries, Ltd.",
                 "Product": "Brother b-PAC Client Component",
+                "ProductVersion": "3.4.017",
                 "Template": "x64;1033",
             },
             expected_bits=64,
@@ -45,6 +47,7 @@ class BpacSetupTests(unittest.TestCase):
                 "Status": "Valid",
                 "Subject": "O=Brother Industries, Ltd.",
                 "Product": "b-PAC Client Component",
+                "ProductVersion": "3.4.017",
                 "Template": "Intel;1033",
             },
             expected_bits=32,
@@ -56,6 +59,7 @@ class BpacSetupTests(unittest.TestCase):
             "Status": "Valid",
             "Subject": "O=Brother Industries, Ltd.",
             "Product": "b-PAC Client Component",
+            "ProductVersion": "3.4.017",
             "Template": "x64;1033",
         }
         self.assertFalse(
@@ -76,6 +80,73 @@ class BpacSetupTests(unittest.TestCase):
         self.assertFalse(
             _SETUP.validate_bpac_signature_report(base, expected_bits=32)[0]
         )
+
+    def test_installed_version_comparison_handles_numeric_components(self):
+        self.assertEqual(_SETUP.compare_versions("3.4.016", "3.4.017"), -1)
+        self.assertEqual(_SETUP.compare_versions("3.4.017", "3.4.017"), 0)
+        self.assertEqual(_SETUP.compare_versions("3.4.018", "3.4.017"), 1)
+        self.assertEqual(_SETUP.compare_versions("3.4.17.0", "3.4.017"), 0)
+        self.assertIsNone(_SETUP.compare_versions("unknown", "3.4.017"))
+
+    def test_old_or_unverifiable_msi_version_is_rejected(self):
+        report = {
+            "Status": "Valid",
+            "Subject": "O=Brother Industries, Ltd.",
+            "Product": "Brother b-PAC Client Component",
+            "Template": "x64;1033",
+        }
+        old_ok, old_message = _SETUP.validate_bpac_signature_report(
+            {**report, "ProductVersion": "3.4.016"}, expected_bits=64
+        )
+        unknown_ok, unknown_message = _SETUP.validate_bpac_signature_report(
+            report, expected_bits=64
+        )
+        self.assertFalse(old_ok)
+        self.assertIn("äldre", old_message)
+        self.assertFalse(unknown_ok)
+        self.assertIn("versionen kunde inte verifieras", unknown_message)
+
+    def test_installed_bpac_version_is_read_from_both_registry_views(self):
+        winreg = types.ModuleType("winreg")
+        winreg.HKEY_LOCAL_MACHINE = "HKLM"
+        winreg.HKEY_CURRENT_USER = "HKCU"
+        winreg.KEY_READ = 1
+        winreg.KEY_WOW64_64KEY = 2
+        winreg.KEY_WOW64_32KEY = 4
+        uninstall_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+        records = {
+            ("HKLM", 2): {"DisplayName": "Brother b-PAC Client Component", "DisplayVersion": "3.4.016"},
+            ("HKCU", 4): {"DisplayName": "Unrelated app", "DisplayVersion": "9.9.9"},
+        }
+
+        def open_key(root, path, *_args):
+            if root in {"HKLM", "HKCU"}:
+                if path != uninstall_path:
+                    raise OSError("key not found")
+                return ("parent", root, _args[-1] & 6)
+            return ("entry", root[1], path, root[2])
+
+        def enum_key(parent, index):
+            _kind, root, view = parent
+            if index == 0 and (root, view) in records:
+                return "product"
+            raise OSError("no more keys")
+
+        def query_value(key, name):
+            _kind, root, _subkey, view = key
+            values = records[(root, view)]
+            if name not in values:
+                raise OSError("value not found")
+            return values[name], 1
+
+        winreg.OpenKey = open_key
+        winreg.EnumKey = enum_key
+        winreg.QueryValueEx = query_value
+        winreg.CloseKey = lambda _key: None
+        with patch.object(_SETUP.sys, "platform", "win32"), patch.dict(
+            sys.modules, {"winreg": winreg}
+        ):
+            self.assertEqual(_SETUP.installed_bpac_version(), "3.4.016")
 
     def test_installer_operations_are_rejected_off_windows(self):
         with patch.object(_SETUP.sys, "platform", "linux"):

@@ -2543,21 +2543,47 @@ class Plugin:
         if self._bpac_setup_prompted:
             return
         self._bpac_setup_prompted = True
-        if sys.platform != "win32" or _labels.bpac_available():
+        if sys.platform != "win32":
             return
         label_folder = _labels.label_folder(self.templates_path)
         if not _labels.find_labels(label_folder):
             return
 
+        available = _labels.bpac_available()
+        installed_version = _bpac_setup.installed_bpac_version() if available else None
+        version_comparison = (
+            _bpac_setup.compare_versions(installed_version, _bpac_setup.BPAC_TARGET_VERSION)
+            if installed_version
+            else None
+        )
+        if available and version_comparison is not None and version_comparison >= 0:
+            return
+
         parent = parent or self._tab_widget
         bits = _bpac_setup.application_bitness()
+        missing = not available
         prompt = QMessageBox(parent)
-        prompt.setIcon(QMessageBox.Icon.Information)
-        prompt.setWindowTitle("Brother b-PAC saknas")
-        prompt.setText("Etikettmallar finns, men b-PAC Client Component är inte installerad.")
+        prompt.setIcon(
+            QMessageBox.Icon.Information if missing else QMessageBox.Icon.Warning
+        )
+        prompt.setWindowTitle(
+            "Brother b-PAC saknas" if missing else "Brother b-PAC-uppdatering behövs"
+        )
+        if missing:
+            prompt.setText("Etikettmallar finns, men b-PAC Client Component är inte installerad.")
+            reason = "Installera b-PAC för att aktivera etikettutskrift."
+        elif installed_version:
+            prompt.setText(
+                f"Installerad b-PAC-version är {installed_version}; "
+                f"rekommenderad version är {_bpac_setup.BPAC_TARGET_VERSION}."
+            )
+            reason = "En uppdatering rekommenderas för att etikettutskriften ska fungera korrekt."
+        else:
+            prompt.setText("b-PAC finns, men den installerade versionen kunde inte läsas.")
+            reason = "Du kan kontrollera Brothers sida och installera den senaste signerade versionen."
         prompt.setInformativeText(
-            f"Appen behöver Brother b-PAC {bits}-bitars för att kunna skriva ut .lbx-etiketter. "
-            "Vill du hämta och installera Brother-komponenten nu?"
+            f"{reason}\n\nAppen behöver Brother b-PAC {bits}-bitars för .lbx-etiketter. "
+            "Vill du hämta och installera/uppdatera Brother-komponenten nu?"
         )
         install_button = prompt.addButton(
             "Hämta och installera…", QMessageBox.ButtonRole.AcceptRole
