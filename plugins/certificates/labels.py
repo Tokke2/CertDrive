@@ -126,20 +126,37 @@ def print_label(
         return LabelResult(False, name, copies,
                            error="pywin32 saknas — installera paketet 'pywin32'")
 
-    pythoncom.CoInitialize()
     document: Any = None
     filled: list[str] = []
+    com_initialized = False
+    stage = "initiera COM"
     try:
-        try:
-            document = win32com.client.Dispatch(BPAC_PROGID)
-        except Exception as exc:
-            raise RuntimeError(
-                "Brother b-PAC Client Component saknas eller har fel bitness "
-                f"(64-bitars Python kräver 64-bitars b-PAC). Hämta: {BPAC_DOWNLOAD_URL}"
-            ) from exc
+        pythoncom.CoInitialize()
+        com_initialized = True
+        stage = "skapa en separat b-PAC-instans"
+        dispatch_ex = getattr(win32com.client, "DispatchEx", None)
+        dispatch_errors: list[str] = []
+        if callable(dispatch_ex):
+            try:
+                document = dispatch_ex(BPAC_PROGID)
+            except Exception as exc:
+                dispatch_errors.append(f"DispatchEx: {type(exc).__name__}: {exc}")
+        if document is None:
+            try:
+                document = win32com.client.Dispatch(BPAC_PROGID)
+            except Exception as exc:
+                dispatch_errors.append(f"Dispatch: {type(exc).__name__}: {exc}")
+                detail = "; ".join(dispatch_errors)
+                raise RuntimeError(
+                    "Brother b-PAC COM-objektet kunde inte skapas. Kontrollera att "
+                    "b-PAC Client Component är installerad i samma bitness som "
+                    f"IntygsDrive. {detail} Hämta: {BPAC_DOWNLOAD_URL}"
+                ) from exc
+        stage = "öppna etikettmallen"
         if not document.Open(str(label_path)):
             raise RuntimeError(f"b-PAC kunde inte öppna {name} (felkod {document.ErrorCode})")
         if printer_name:
+            stage = "välja skrivare"
             printer_result = document.SetPrinter(printer_name, True)
             if printer_result is not None and not bool(printer_result):
                 error_code = getattr(document, "ErrorCode", "okänd")
@@ -147,6 +164,7 @@ def print_label(
                     f"b-PAC kunde inte välja skrivaren {printer_name} (felkod {error_code})"
                 )
         if calibration:
+            stage = "läsa mallens textfält"
             text_count = int(document.GetTextCount())
             if text_count <= 0:
                 raise RuntimeError(
@@ -154,6 +172,7 @@ def print_label(
                     "Välj en etikettmall med minst ett textobjekt."
                 )
             for index in range(text_count):
+                stage = f"fylla kalibreringsfält {index + 1}"
                 if not document.SetText(index, calibration_text(index)):
                     raise RuntimeError(
                         f"Kalibreringsmönstret kunde inte fylla textfält {index + 1}."
@@ -161,14 +180,17 @@ def print_label(
                 filled.append(f"text_{index + 1}")
         else:
             for key, value in (values or {}).items():
+                stage = "fylla etikettfält"
                 obj = document.GetObject(str(key))
                 if obj is not None:
                     obj.Text = str(value)
                     filled.append(str(key))
+        stage = "starta utskriftsjobbet"
         start_result = document.StartPrint(label_path.stem, _BPAC_PRINT_DEFAULT)
         if start_result is not None and not bool(start_result):
             error_code = getattr(document, "ErrorCode", "okänd")
             raise RuntimeError(f"b-PAC kunde inte starta utskriften (felkod {error_code})")
+        stage = "skicka jobbet till skrivaren"
         print_result = document.PrintOut(copies, _BPAC_PRINT_DEFAULT)
         end_result = document.EndPrint()
         if print_result is not None and not bool(print_result):
@@ -179,8 +201,14 @@ def print_label(
             raise RuntimeError(f"b-PAC avslutade utskriften med fel (felkod {error_code})")
         return LabelResult(True, name, copies, filled, duration=time.perf_counter() - started)
     except Exception as exc:
-        _logger.exception("[LABEL] Utskrift av %s misslyckades", name)
-        return LabelResult(False, name, copies, filled, error=str(exc),
+        _logger.exception("[LABEL] Utskrift av %s misslyckades vid steget %s", name, stage)
+        error = f"Fel vid {stage}: {exc}"
+        if stage in {"initiera COM", "skapa en separat b-PAC-instans"}:
+            error += (
+                f"\n\nKontrollera att Brother b-PAC Client Component är installerad "
+                "i samma bitness som IntygsDrive och att appen har startats om efter installationen."
+            )
+        return LabelResult(False, name, copies, filled, error=error,
                            duration=time.perf_counter() - started)
     finally:
         if document is not None:
@@ -188,4 +216,5 @@ def print_label(
                 document.Close()
             except Exception:
                 _logger.exception("[LABEL] Kunde inte stänga b-PAC-dokument")
-        pythoncom.CoUninitialize()
+        if com_initialized:
+            pythoncom.CoUninitialize()

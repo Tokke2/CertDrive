@@ -64,7 +64,9 @@ class LabelCalibrationTests(unittest.TestCase):
         pythoncom.CoInitialize = lambda: None
         pythoncom.CoUninitialize = lambda: None
         client = types.ModuleType("win32com.client")
+        dispatch_ex_calls = []
         client.Dispatch = lambda _progid: document
+        client.DispatchEx = lambda progid: dispatch_ex_calls.append(progid) or document
         win32com = types.ModuleType("win32com")
         win32com.__path__ = []
         win32com.client = client
@@ -89,6 +91,7 @@ class LabelCalibrationTests(unittest.TestCase):
                 )
 
         self.assertTrue(result.ok, result.error)
+        self.assertEqual(dispatch_ex_calls, [_LABELS.BPAC_PROGID])
         self.assertEqual(result.copies, 1)
         self.assertEqual(document.printer, "Selected Brother printer")
         self.assertTrue(document.printed)
@@ -110,6 +113,9 @@ class LabelCalibrationTests(unittest.TestCase):
         pythoncom.CoUninitialize = lambda: None
         client = types.ModuleType("win32com.client")
         client.Dispatch = lambda _progid: document
+        client.DispatchEx = lambda _progid: (_ for _ in ()).throw(
+            TypeError("Init object is not callable")
+        )
         win32com = types.ModuleType("win32com")
         win32com.__path__ = []
         win32com.client = client
@@ -129,7 +135,36 @@ class LabelCalibrationTests(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertIn("kunde inte skicka jobbet", result.error)
+        self.assertNotIn("Init object is not callable", result.error)
         self.assertTrue(document.printed)
+
+    def test_bpac_activation_error_names_the_setup_step_and_preserves_cause(self):
+        pythoncom = types.ModuleType("pythoncom")
+        pythoncom.CoInitialize = lambda: None
+        pythoncom.CoUninitialize = lambda: None
+        client = types.ModuleType("win32com.client")
+        fail = lambda _progid: (_ for _ in ()).throw(
+            TypeError("Init object is not callable")
+        )
+        client.Dispatch = fail
+        client.DispatchEx = fail
+        win32com = types.ModuleType("win32com")
+        win32com.__path__ = []
+        win32com.client = client
+
+        with tempfile.TemporaryDirectory() as directory:
+            label_path = Path(directory) / "test.lbx"
+            label_path.touch()
+            with mock.patch.object(_LABELS.sys, "platform", "win32"), mock.patch.dict(
+                sys.modules,
+                {"pythoncom": pythoncom, "win32com": win32com, "win32com.client": client},
+            ), self.assertLogs("Intyg.labels", level="ERROR"):
+                result = _LABELS.print_label(label_path, calibration=True)
+
+        self.assertFalse(result.ok)
+        self.assertIn("skapa en separat b-PAC-instans", result.error)
+        self.assertIn("Init object is not callable", result.error)
+        self.assertIn("samma bitness", result.error)
 
     def test_template_without_editable_text_is_not_sent_to_printer(self):
         document = _FakeDocument(text_count=0)
