@@ -14,6 +14,7 @@ _SPEC.loader.exec_module(_HISTORY_MODULE)
 find_duplicate_certificates = _HISTORY_MODULE.find_duplicate_certificates
 normalize_registration = _HISTORY_MODULE.normalize_registration
 registration_from_values = _HISTORY_MODULE.registration_from_values
+vin_from_values = _HISTORY_MODULE.vin_from_values
 
 
 class CertificateHistoryDuplicateTests(unittest.TestCase):
@@ -37,7 +38,29 @@ class CertificateHistoryDuplicateTests(unittest.TestCase):
         self.assertEqual(len(find_duplicate_certificates(records, "Personbil", "DEF 456")), 2)
         self.assertEqual(registration_from_values({"Reg nr": "DEF 456"}), "DEF456")
 
-    def test_empty_registration_never_matches(self):
+    def test_matches_same_template_by_vin_even_when_registration_is_missing(self):
+        records = [
+            {"template": "35kW", "values": {"Chassinummer": "1HGCM82633A004352"}, "id": 1},
+            {"template": "Personbil", "vin": "1HGCM82633A004352", "id": 2},
+        ]
+        matches = find_duplicate_certificates(
+            records, "35kW", "", "1hgcm-82633a004352"
+        )
+        self.assertEqual([record["id"] for record in matches], [1])
+        self.assertEqual(vin_from_values({"VIN nummer": "1HGCM82633A004352"}), "1HGCM82633A004352")
+
+    def test_matches_by_registration_or_vin_once(self):
+        record = {
+            "template": "35kW",
+            "reg": "ABC123",
+            "vin": "1HGCM82633A004352",
+        }
+        self.assertEqual(
+            find_duplicate_certificates([record], "35kW", "ABC123", "1HGCM82633A004352"),
+            [record],
+        )
+
+    def test_empty_identifiers_never_match(self):
         self.assertEqual(find_duplicate_certificates(
             [{"template": "35kW", "reg": ""}], "35kW", ""
         ), [])

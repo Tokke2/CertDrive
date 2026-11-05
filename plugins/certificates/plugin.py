@@ -70,7 +70,7 @@ from . import labels as _labels
 from . import bpac_setup as _bpac_setup
 from .counter_security import CounterPinStore
 from .customers import Customer, load_customers, save_customers
-from .history import find_duplicate_certificates, registration_from_values
+from .history import find_duplicate_certificates, registration_from_values, vin_from_values
 from .label_mappings import load_label_mappings, save_label_mappings
 from .printer_settings import (
     default_printer,
@@ -2089,7 +2089,7 @@ class Plugin:
 
         for field_name in fields:
             upper = field_name.upper()
-            kind = "vin" if upper in {"VIN", "CHASSI", "CHASSINUMMER"} else "reg" if upper in {"REG", "REGNR", "REGISTRERINGSNUMMER"} else ""
+            kind = "vin" if upper in {"VIN", "VINNUMMER", "CHASSI", "CHASSINUMMER"} else "reg" if upper in {"REG", "REGNR", "REGISTRERINGSNUMMER"} else ""
             validator: Callable[[str], Any] | None = None
             tooltip = ""
             if kind == "vin":
@@ -2159,11 +2159,16 @@ class Plugin:
 
     @Slot(str, str)
     def _on_field_value_changed(self, field_name: str, value: str) -> None:
-        self._evt("cert.field_changed", f"Fält ändrat: {field_name}",
-                  level=logging.DEBUG, field=field_name, value=str(value)[:60])
+        self._evt(
+            "cert.field_changed",
+            f"Fält ändrat: {field_name}",
+            level=logging.DEBUG,
+            field=field_name,
+            value_present=bool(value),
+        )
         self._emit_event(
             "certificate.placeholder_updated",
-            {"field": field_name, "value": value},
+            {"field": field_name, "value_present": bool(value)},
         )
 
     def _collect_values(self) -> dict[str, str]:
@@ -2239,10 +2244,11 @@ class Plugin:
         self, template_name: str, values: dict[str, str]
     ) -> bool:
         registration = registration_from_values(values)
-        if not registration:
+        vin = vin_from_values(values)
+        if not (registration or vin):
             return True
         duplicates = find_duplicate_certificates(
-            self._certificate_history_records(), template_name, registration
+            self._certificate_history_records(), template_name, registration, vin
         )
         if not duplicates:
             return True
@@ -2267,17 +2273,19 @@ class Plugin:
         answer = QMessageBox.question(
             self._tab_widget,
             "Intyg finns redan",
-            f"Det finns redan {len(duplicates)} intyg i historiken med registreringsnummer "
-            f"{registration} för mallen {template_name}.\n\n"
+            f"Det finns redan {len(duplicates)} intyg i historiken med samma "
+            f"registreringsnummer och/eller VIN/chassinummer för mallen {template_name}.\n\n"
             + "\n".join(lines)
             + "\n\nVill du skapa ett till intyg ändå?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         self._evt(
-            "cert.duplicate_registration",
-            f"Dubblettvarning för {registration} ({template_name})",
-            registration=registration, template=template_name, matches=len(duplicates),
+            "cert.duplicate_vehicle",
+            f"Dubblettvarning visad för mall {template_name}",
+            template=template_name,
+            matches=len(duplicates),
+            identifiers_checked=sum(bool(value) for value in (registration, vin)),
             continued=answer == QMessageBox.StandardButton.Yes,
         )
         return answer == QMessageBox.StandardButton.Yes
@@ -2290,35 +2298,51 @@ class Plugin:
             self._evt("cert.generate_blocked", "Generering blockerad: ingen mall vald",
                       level=logging.WARNING)
             return
-        generator = self._generator
-        if generator is None or not self._converter_available:
+        values = self._collect_values()
+        blockers, missing = self._generation_preflight(template, values)
+        if blockers:
+            checklist = ["Kontroll före generering:"]
+            checklist.extend(f"• {item}" for item in blockers)
+            if missing:
+                checklist.extend(["", "Tomma fält (valfritt att fylla i):"])
+                checklist.extend(f"• {item}" for item in missing)
             QMessageBox.warning(
                 self._tab_widget,
-                "PDF-konverterare",
-                "PDF-konverteraren är inte tillgänglig ännu. Kontrollera LibreOffice eller docx2pdf.",
+                "Kontroll före generering",
+                "\n".join(checklist),
             )
-            self._evt("cert.generate_blocked", "Generering blockerad: konverterare saknas",
-                      level=logging.WARNING, template=name)
+            self._evt(
+                "cert.preflight_blocked",
+                "Generering blockerad av förkontrollen",
+                level=logging.WARNING,
+                template=name,
+                blockers=len(blockers),
+                missing=len(missing),
+            )
             return
-        values = self._collect_values()
-        if not self._validate_before_generation(template, values):
-            return
+        if missing:
+            answer = QMessageBox.question(
+                self._tab_widget,
+                "Kontroll före generering",
+                "Följande fält är tomma:\n\n• "
+                + "\n• ".join(missing)
+                + "\n\nDu kan fylla i dem eller fortsätta ändå. Fortsätta nu?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self._evt(
+                    "cert.generate_cancelled",
+                    "Generering avbruten efter förkontroll",
+                    level=logging.DEBUG,
+                    template=name,
+                    missing=len(missing),
+                )
+                return
         if not self._confirm_no_duplicate_registration(name, values):
             self._evt("cert.generate_cancelled", "Generering avbruten efter dubblettvarning",
                       level=logging.INFO, template=name)
             return
-        missing = [_field_label(field.field_name) for field in self._field_widgets if not field.get_value()]
-        if missing:
-            answer = QMessageBox.question(
-                self._tab_widget,
-                "Tomma fält",
-                "Följande fält är tomma:\n\n• " + "\n• ".join(missing) + "\n\nFortsätta ändå?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                self._evt("cert.generate_cancelled", "Generering avbruten (tomma fält)",
-                          level=logging.DEBUG, template=name, missing=len(missing))
-                return
 
         self._set_action_buttons_enabled(False)
         self._show_progress(True, "⏳ Förbereder generering…")
@@ -2330,6 +2354,7 @@ class Plugin:
         self._pending_label_print = bool(
             self._label_print_checkbox and self._label_print_checkbox.isChecked()
         )
+        generator = self._generator
         worker = _GenerationWorker(generator, template, values)
         worker.signals.progress.connect(self._on_generation_progress, Qt.ConnectionType.QueuedConnection)
         worker.signals.finished.connect(self._on_generation_finished, Qt.ConnectionType.QueuedConnection)
@@ -2346,31 +2371,74 @@ class Plugin:
             return "", None
         return name, template
 
-    def _validate_before_generation(self, template: Any, values: dict[str, str]) -> bool:
+    def _generation_preflight(
+        self, template: Any, values: dict[str, str]
+    ) -> tuple[list[str], list[str]]:
+        """Collect blocking issues and optional blanks before showing one checklist."""
+        blockers: list[str] = []
+        missing = [
+            _field_label(field.field_name)
+            for field in self._field_widgets
+            if not field.get_value().strip()
+        ]
+
+        template_valid = _safe_get(template, "is_valid", None)
+        docx_file = _safe_get(template, "docx_file", None)
+        if template_valid is False:
+            blockers.append("Den valda mallfilen är trasig eller saknas.")
+        elif docx_file is not None:
+            try:
+                path = Path(docx_file)
+                if path.suffix.casefold() != ".docx" or not path.is_file():
+                    blockers.append("Mallfilen kan inte hittas eller är inte en DOCX-fil.")
+            except (TypeError, ValueError, OSError):
+                blockers.append("Mallfilens sökväg är ogiltig.")
+
+        if self._generator is None:
+            blockers.append("Intygsgeneratorn är inte tillgänglig.")
+        if not self._converter_available:
+            blockers.append("PDF-konverteraren saknas (kontrollera LibreOffice eller docx2pdf).")
+        blockers.extend(self._validate_before_generation(template, values))
+        return blockers, missing
+
+    def _validate_before_generation(self, template: Any, values: dict[str, str]) -> list[str]:
         config = _safe_get(template, "config", None)
         validate_vin = bool(_safe_get(config, "validate_vin", True))
         validate_reg = bool(_safe_get(config, "validate_reg", False))
         checks: tuple[tuple[set[str], Callable[[str], Any], str, bool], ...] = (
-            ({"VIN", "CHASSI", "CHASSINUMMER"}, _VINValidator.validate, "Ogiltigt VIN", validate_vin),
+            ({"VIN", "VINNUMMER", "CHASSI", "CHASSINUMMER"}, _VINValidator.validate, "Ogiltigt VIN", validate_vin),
             ({"REG", "REGNR", "REGISTRERINGSNUMMER"}, _RegValidator.validate, "Ogiltigt registreringsnummer", validate_reg),
         )
+        issues: list[str] = []
         for names, validator, title, enabled in checks:
             if not enabled:
                 continue
-            value = next((value for key, value in values.items() if key.upper() in names and value.strip()), "")
+            value = next(
+                (
+                    candidate
+                    for key, candidate in values.items()
+                    if "".join(character for character in key.upper() if character.isalnum()) in names
+                    and candidate.strip()
+                ),
+                "",
+            )
             if not value:
                 continue
             try:
                 result = validator(value)
                 if bool(_safe_get(result, "is_error", False)):
-                    QMessageBox.critical(self._tab_widget, title, str(_safe_get(result, "message", title)))
-                    self._evt("cert.validation_failed", f"Validering misslyckades: {title}",
-                              level=logging.WARNING, title=title, value=str(value)[:20])
-                    return False
+                    message = str(_safe_get(result, "message", title) or title)
+                    issues.append(f"{title}: {message}")
+                    self._evt(
+                        "cert.validation_failed",
+                        f"Förkontrollen misslyckades: {title}",
+                        level=logging.WARNING,
+                        title=title,
+                    )
             except Exception:
                 self._log.exception("[CERTIFICATES] Validering misslyckades")
-                return False
-        return True
+                issues.append(f"{title}: värdet kunde inte valideras.")
+        return issues
 
     @Slot(str, int)
     def _on_generation_progress(self, message: str, percent: int) -> None:

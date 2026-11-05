@@ -468,10 +468,12 @@ try:
         QColor,
         QCloseEvent,
         QIcon,
+        QKeySequence,
         QLinearGradient,
         QPainter,
         QPen,
         QPixmap,
+        QShortcut,
     )
     from PySide6.QtWidgets import (
         QApplication,
@@ -868,6 +870,10 @@ class MainWindow(QMainWindow):
         self._template_names: list[str] = []
         self._templates_count = 0
         self._templates_scanned = False
+        self._home_tab: QWidget | None = None
+        self._recent_activity_layout: QVBoxLayout | None = None
+        self._keyboard_shortcuts: list[QShortcut] = []
+        self._syncing_tabs = False
 
         self.show_signal.connect(self._on_show)
         self.hide_signal.connect(self._on_hide)
@@ -1027,7 +1033,12 @@ class MainWindow(QMainWindow):
         self._tabs.setElideMode(Qt.TextElideMode.ElideRight)
         self._tabs.setIconSize(QSize(_scale(18), _scale(18)))
         self._tabs.setAccessibleName("Arbetsflikar")
+        self._tabs.setAccessibleDescription(
+            "Använd Ctrl+1 till startsidan, Ctrl+2 till Ctrl+9 till arbetsflikar "
+            "och Ctrl+PageUp/PageDown för att byta flik."
+        )
         self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._build_navigation_shortcuts()
         tab_bar = self._tabs.tabBar()
         tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         tab_bar.customContextMenuRequested.connect(self._show_tab_context_menu)
@@ -1181,24 +1192,31 @@ class MainWindow(QMainWindow):
         if self._tabs is None:
             return
         current_name = preferred_name or self._current_tab_name()
-        while self._tabs.count():
-            self._tabs.removeTab(0)
+        self._syncing_tabs = True
+        try:
+            while self._tabs.count():
+                self._tabs.removeTab(0)
 
-        visible_records = [record for record in self._tab_records if record.visible]
-        if not visible_records:
+            visible_records = [record for record in self._tab_records if record.visible]
+            if self._home_tab is None:
+                self._home_tab = self._build_dashboard()
             self._tabs.addTab(
-                self._get_empty_tab(),
-                self._standard_icon("SP_MessageBoxInformation"),
+                self._home_tab,
+                self._standard_icon("SP_ComputerIcon"),
                 "Start",
             )
-            return
-
-        index_to_select = 0
-        for index, record in enumerate(visible_records):
-            self._tabs.addTab(record.widget, record.icon, record.name)
-            if record.name == current_name:
-                index_to_select = index
-        self._tabs.setCurrentIndex(index_to_select)
+            index_to_select = 0
+            for index, record in enumerate(visible_records, start=1):
+                self._tabs.addTab(record.widget, record.icon, record.name)
+                if record.name == current_name:
+                    index_to_select = index
+            if current_name == "Start":
+                index_to_select = 0
+            elif not visible_records and current_name not in {"", "Start"}:
+                index_to_select = 0
+            self._tabs.setCurrentIndex(index_to_select)
+        finally:
+            self._syncing_tabs = False
 
     def _get_empty_tab(self) -> QWidget:
         if self._empty_tab is not None:
@@ -1295,6 +1313,7 @@ class MainWindow(QMainWindow):
         finally:
             if self._tabs:
                 self._tabs.setUpdatesEnabled(True)
+        self._remember_current_tab()
         self._save_hidden_tabs()
         self._rebuild_view_menu()
         self._refresh_statusbar()
@@ -1313,6 +1332,7 @@ class MainWindow(QMainWindow):
         finally:
             if self._tabs:
                 self._tabs.setUpdatesEnabled(True)
+        self._remember_current_tab()
         self._save_hidden_tabs()
         self._rebuild_view_menu()
         self._refresh_statusbar()
@@ -1333,6 +1353,13 @@ class MainWindow(QMainWindow):
     def _restore_last_tab(self) -> None:
         if self._tabs is None or self._tabs.count() == 0:
             return
+        last_name = str(self._app.config_value("window.last_tab_name", "") or "")
+        if last_name:
+            for index in range(self._tabs.count()):
+                if self._tabs.tabText(index) == last_name:
+                    self._tabs.setCurrentIndex(index)
+                    return
+        # Backward compatibility with configurations written before stable names.
         last_tab = _coerce_int(self._app.config_value("window.last_tab", 0), 0)
         if 0 <= last_tab < self._tabs.count():
             self._tabs.setCurrentIndex(last_tab)
@@ -1343,17 +1370,196 @@ class MainWindow(QMainWindow):
         index = self._tabs.currentIndex()
         return self._tabs.tabText(index) if index >= 0 else ""
 
+    def _remember_current_tab(self) -> None:
+        if (
+            self._tabs is not None
+            and self._tabs.currentIndex() >= 0
+            and self._home_tab is not None
+        ):
+            self._app.set_config_value(
+                "window.last_tab_name", self._current_tab_name(), auto_save=True
+            )
+
     @Slot(int)
     def _on_tab_changed(self, index: int) -> None:
-        if index >= 0:
-            self._app.set_config_value("window.last_tab", index, auto_save=True)
+        if index >= 0 and not self._syncing_tabs:
+            self._remember_current_tab()
+        if self._tabs is not None and self._tabs.currentWidget() is self._home_tab:
+            self._refresh_recent_activity()
         self._refresh_statusbar()
+
+    def _build_navigation_shortcuts(self) -> None:
+        """Shortcuts use the visible tab order and remain available across plugins."""
+        bindings = [("Ctrl+1", lambda: self._select_tab(0))]
+        bindings.extend(
+            (f"Ctrl+{number}", lambda index=number - 1: self._select_tab(index))
+            for number in range(2, 10)
+        )
+        bindings.extend(
+            [
+                ("Ctrl+PageDown", lambda: self._move_tab(1)),
+                ("Ctrl+PageUp", lambda: self._move_tab(-1)),
+            ]
+        )
+        for sequence, callback in bindings:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(callback)
+            self._keyboard_shortcuts.append(shortcut)
+
+    def _select_tab(self, index: int) -> None:
+        if self._tabs is not None and 0 <= index < self._tabs.count():
+            self._tabs.setCurrentIndex(index)
+
+    def _move_tab(self, offset: int) -> None:
+        if self._tabs is not None and self._tabs.count():
+            self._tabs.setCurrentIndex(
+                (self._tabs.currentIndex() + offset) % self._tabs.count()
+            )
+
+    def _open_workspace_tab(self, query: str) -> None:
+        if self._tabs is None:
+            return
+        wanted = query.casefold()
+        for index in range(self._tabs.count()):
+            if wanted in self._tabs.tabText(index).casefold():
+                self._tabs.setCurrentIndex(index)
+                return
+        # If a quick-link target is hidden, make all plugin tabs visible first.
+        if any(wanted in record.name.casefold() for record in self._tab_records):
+            self._show_all_tabs()
+            for index in range(self._tabs.count()):
+                if wanted in self._tabs.tabText(index).casefold():
+                    self._tabs.setCurrentIndex(index)
+                    return
+
+    def _build_dashboard(self) -> QWidget:
+        page = QWidget(self)
+        page.setAccessibleName("Startsida")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(14)
+
+        title = QLabel("Välkommen till IntygsDrive", page)
+        title.setAccessibleName("Startsida: Välkommen")
+        title_font = title.font()
+        title_font.setPointSize(max(16, title_font.pointSize() + 5))
+        title_font.setBold(True)
+        title.setFont(title_font)
+        layout.addWidget(title)
+
+        description = QLabel(
+            "Skapa fordonsintyg, öppna dina arbetsytor eller fortsätt där du senast var.",
+            page,
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        create = QPushButton("Skapa intyg", page)
+        create.setMinimumHeight(_scale(42))
+        create.setAccessibleName("Gå till intyg och skapa ett intyg")
+        create.setToolTip("Öppna intygsfliken (Ctrl+2 om den är första arbetsfliken).")
+        create.clicked.connect(lambda: self._open_workspace_tab("intyg"))
+        actions.addWidget(create)
+        templates = QPushButton("Öppna mallar", page)
+        templates.setMinimumHeight(_scale(42))
+        templates.setAccessibleName("Öppna mallmappen")
+        templates.clicked.connect(lambda: self._open_folder(APP_PATH / FOLDER_TEMPLATES))
+        actions.addWidget(templates)
+        output = QPushButton("Öppna output", page)
+        output.setMinimumHeight(_scale(42))
+        output.setAccessibleName("Öppna mappen med skapade intyg")
+        output.clicked.connect(lambda: self._open_folder(APP_PATH / FOLDER_OUTPUT))
+        actions.addWidget(output)
+        show_tabs = QPushButton("Visa arbetsflikar", page)
+        show_tabs.setMinimumHeight(_scale(42))
+        show_tabs.setAccessibleName("Visa alla arbetsflikar")
+        show_tabs.clicked.connect(self._show_all_tabs)
+        actions.addWidget(show_tabs)
+        layout.addLayout(actions)
+
+        recent_title = QLabel("Senaste aktivitet", page)
+        recent_title_font = recent_title.font()
+        recent_title_font.setBold(True)
+        recent_title.setFont(recent_title_font)
+        layout.addWidget(recent_title)
+        self._recent_activity_layout = QVBoxLayout()
+        self._recent_activity_layout.setSpacing(5)
+        recent_container = QWidget(page)
+        recent_container.setLayout(self._recent_activity_layout)
+        recent_container.setAccessibleName("Senaste aktivitet")
+        layout.addWidget(recent_container)
+        layout.addStretch(1)
+
+        help_text = QLabel(
+            "Tangentbord: Ctrl+1 startsida · Ctrl+2–9 arbetsflikar · "
+            "Ctrl+PageUp/PageDown byt flik · Tab flyttar fokus mellan kontroller.",
+            page,
+        )
+        help_text.setWordWrap(True)
+        help_text.setAccessibleDescription("Översikt över tangentbordsgenvägar.")
+        layout.addWidget(help_text)
+        self._home_tab = page
+        self._refresh_recent_activity()
+        return page
+
+    def _refresh_recent_activity(self) -> None:
+        target = self._recent_activity_layout
+        if target is None:
+            return
+        while target.count():
+            item = target.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        output_path = APP_PATH / FOLDER_OUTPUT
+        recent: list[tuple[float, datetime]] = []
+        visited = 0
+        try:
+            for directory, subdirectories, filenames in os.walk(output_path):
+                depth = len(Path(directory).relative_to(output_path).parts)
+                if depth >= 2:
+                    subdirectories[:] = []
+                for filename in filenames:
+                    if not filename.casefold().endswith(".pdf"):
+                        continue
+                    try:
+                        modified = (Path(directory) / filename).stat().st_mtime
+                        modified_at = datetime.fromtimestamp(modified)
+                    except (OSError, OverflowError, ValueError):
+                        continue
+                    recent.append((modified, modified_at))
+                    visited += 1
+                    if visited >= 500:
+                        subdirectories[:] = []
+                        break
+                if visited >= 500:
+                    break
+        except OSError:
+            recent = []
+
+        recent.sort(key=lambda item: item[0], reverse=True)
+        if not recent:
+            label = QLabel("Inga skapade PDF-intyg ännu.", self._home_tab)
+            label.setAccessibleDescription("Ingen senaste aktivitet att visa.")
+            target.addWidget(label)
+            return
+        for _timestamp, modified_at in recent[:5]:
+            label = QLabel(
+                f"PDF-intyg · {modified_at.strftime('%Y-%m-%d %H:%M')}",
+                self._home_tab,
+            )
+            label.setAccessibleDescription("Ett PDF-intyg ändrades senast vid angiven tid.")
+            target.addWidget(label)
 
     def _refresh_statusbar(self) -> None:
         if self._status_label is None:
             return
         plugin_count = len(self._app.plugin_manager) if self._app.plugin_manager else 0
-        visible_tabs = sum(1 for record in self._tab_records if record.visible)
+        visible_tabs = 1 + sum(1 for record in self._tab_records if record.visible)
         self._status_label.setText(
             f"v{APP_VERSION} • {plugin_count} plugins • {visible_tabs} flikar"
         )
