@@ -1,72 +1,51 @@
-"""Register the per-user Monday 08:00 Python maintenance task on Windows."""
+"""Remove the obsolete weekly Python updater task from Task Scheduler."""
 from __future__ import annotations
 
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 
 TASK_NAME = "IntygsDrive Python Weekly Update"
 
 
-def _ps_quote(value: str) -> str:
-    """Quote a literal for a PowerShell single-quoted string."""
-    return "'" + value.replace("'", "''") + "'"
+def remove_weekly_python_update_task() -> tuple[bool, str]:
+    """Remove a previously installed IntygsDrive Python update task, if any.
 
-
-def ensure_weekly_python_update_task(root: Path | str) -> tuple[bool, str]:
-    """Ensure a current-user Task Scheduler job runs every Monday at 08:00.
-
-    Returns (success, message). It does not run Python or pip during app startup;
-    it only registers or checks the weekly scheduled task.
+    This only queries/deletes the named task. It never runs Python, pip, or the
+    task's update script. Non-Windows platforms have no such scheduled task.
     """
     if sys.platform != "win32":
-        return False, "The weekly Python task is supported on Windows only."
-    app_root = Path(root).resolve()
-    updater_script = app_root / "core" / "python_weekly_update.ps1"
-    if not updater_script.is_file():
-        return False, "The weekly Python update script was not found."
+        return True, "No Windows Python update task exists on this platform."
 
     task_scheduler = shutil.which("schtasks.exe") or shutil.which("schtasks")
-    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
-    if not task_scheduler or not powershell:
-        return False, "Windows Task Scheduler or Windows PowerShell was not found."
+    if not task_scheduler:
+        return False, "Windows Task Scheduler command was not found."
 
-    query = subprocess.run(
-        [task_scheduler, "/Query", "/TN", TASK_NAME],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if query.returncode == 0:
-        return True, "The weekly Python update task is already registered."
-
-    task_name_literal = _ps_quote(TASK_NAME)
-    script_literal = _ps_quote(str(updater_script))
-    script = f"""
-$taskName = {task_name_literal}
-$updateScript = {script_literal}
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $updateScript + '"')
-$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At ([datetime]::Today.AddHours(8))
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Days 6)
-$user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Updates Python and IntygsDrive Python packages weekly on Monday at 08:00.' -Force | Out-Null
-""".strip()
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
-        result = subprocess.run(
-            [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+        query = subprocess.run(
+            [task_scheduler, "/Query", "/TN", TASK_NAME],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=20,
             check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            creationflags=creationflags,
+        )
+        if query.returncode != 0:
+            return True, "No previous weekly Python update task is registered."
+
+        removed = subprocess.run(
+            [task_scheduler, "/Delete", "/TN", TASK_NAME, "/F"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            creationflags=creationflags,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"Could not register the weekly task: {type(exc).__name__}: {exc}"
-    if result.returncode != 0:
-        details = (result.stderr or result.stdout or "").strip()[-500:]
-        return False, f"Could not register the weekly task: {details or result.returncode}"
-    return True, "Registered Python and package maintenance for Monday 08:00."
+        return False, f"Could not remove the weekly Python task: {type(exc).__name__}: {exc}"
+
+    if removed.returncode != 0:
+        details = (removed.stderr or removed.stdout or "").strip()[-300:]
+        return False, f"Could not remove the weekly Python task: {details or removed.returncode}"
+    return True, "Removed the obsolete weekly Python update task."

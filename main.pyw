@@ -9,9 +9,8 @@ plugins/system_tray/.
 
 Appversion 0.0.1 (versionsnumret ändras endast på uttrycklig begäran)
 ====================================================
-1. PYTHONUNDERHÅLL VECKOVIS: Python Install Manager och appens beroenden
-   uppdateras via Windows Schemaläggaren måndag kl. 08:00; inget pip-svep
-   vid varje appstart. Office-alternativ visas separat vid behov.
+1. PYTHON: automatiska Python-/pip-uppdateringar är borttagna. Äldre
+   schemalagda Python-jobb tas bort vid start; erbjudandet om tillägg finns kvar.
 2. 2000000% BÄTTRE AUTOSTART: AutostartGuard — självläkande multi-OS
    (Windows-genväg med appikon, macOS LaunchAgent, Linux XDG .desktop),
    verify-after-write + repair, autostart.*-events.
@@ -1888,8 +1887,8 @@ class Application:
         AutostartGuard(bool(self.config_value("app.start_with_os", True))).ensure()
 
     def _check_dependencies(self) -> None:
-        """Check office-suite availability; Python packages update weekly by task."""
-        # Python package checks/upgrades are intentionally not run at startup.
+        """Check Office availability; optional add-ons remain user-controlled."""
+        # Python package scans/updates are not run automatically at startup.
         self._missing_deps = []
         # 10.12.2: det räcker med EN fungerande konverterare. Finns LibreOffice
         # (eller Word) erbjuds inga andra sviter — OpenOffice föreslås aldrig i onödan.
@@ -1900,46 +1899,32 @@ class Application:
             self._missing_suites = [suite for suite in suites if suite["name"] != "OpenOffice"]
         _evt(
             "main.deps_checked",
-            "Pythonpaket kontrolleras enligt veckoschemat; "
+            "Pythonpaket installeras endast på användarens begäran; "
             f"{len(self._missing_suites)} Office-sviter saknas",
             missing_packages=[],
             missing_suites=[suite["name"] for suite in self._missing_suites],
         )
 
-    def _ensure_weekly_python_update_task(self) -> None:
-        """Register the Monday 08:00 task; no package scan/update runs here."""
-        if not _IS_WINDOWS or getattr(sys, "frozen", False):
+    def _remove_weekly_python_update_task(self) -> None:
+        """Remove the obsolete Python updater task without running an update."""
+        if not _IS_WINDOWS:
             return
-        if not (shutil.which("pymanager.exe") or shutil.which("pymanager")):
-            _evt(
-                "python.weekly_task_unavailable",
-                "Veckouppdatering kräver Python Install Manager (pymanager)",
-                level=logging.WARNING,
-            )
-            if self.window is not None:
-                self.window.status_signal.emit(
-                    "⚠ Veckouppdatering av Python är inte aktiverad: Python Install Manager saknas."
-                )
-            return
-        def register() -> None:
-            try:
-                from core.python_weekly_task import ensure_weekly_python_update_task
 
-                ok, message = ensure_weekly_python_update_task(APP_PATH)
+        def remove_task() -> None:
+            try:
+                from core.python_weekly_task import remove_weekly_python_update_task
+
+                ok, message = remove_weekly_python_update_task()
             except Exception as exc:
                 ok, message = False, f"{type(exc).__name__}: {exc}"
             _evt(
-                "python.weekly_task_registered" if ok else "python.weekly_task_failed",
+                "python.weekly_task_removed" if ok else "python.weekly_task_cleanup_failed",
                 message,
                 level=logging.INFO if ok else logging.WARNING,
             )
-            if self.window is not None and not ok:
-                self.window.status_signal.emit(
-                    f"⚠ Python-veckouppdatering kunde inte schemaläggas: {message}"
-                )
 
         threading.Thread(
-            target=register, name="python-weekly-task-setup", daemon=True
+            target=remove_task, name="remove-obsolete-python-task", daemon=True
         ).start()
 
     def _show_dependency_offer(self) -> None:
@@ -2478,8 +2463,8 @@ class Application:
         QTimer.singleShot(400, self._show_dependency_offer)
         # b-PAC erbjuds separat eftersom Brother kräver EULA-acceptans och UAC.
         QTimer.singleShot(1600, self._offer_bpac_install_at_startup)
-        # Registrerar endast tasken; Python-/paketkontroll sker måndagar kl. 08:00.
-        QTimer.singleShot(3500, self._ensure_weekly_python_update_task)
+        # Ta bort äldre Python-underhållstask utan att köra en uppdatering.
+        QTimer.singleShot(3500, self._remove_weekly_python_update_task)
         # Kontrollera vid start och därefter var tolfte timme (två gånger per dygn).
         QTimer.singleShot(5000, self._start_release_check)
         if self._update_timer is None:

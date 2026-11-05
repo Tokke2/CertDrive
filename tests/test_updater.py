@@ -218,8 +218,9 @@ class AutomaticUpdateStagingTests(unittest.TestCase):
             self.assertEqual(get_current_commit(root), "f" * 40)
             self.assertFalse((root / "js" / ".update-staging" / "pending.json").exists())
 
-    def test_weekly_python_manifest_and_task_script_are_allowlisted(self):
+    def test_legacy_python_task_cleanup_shim_is_allowlisted(self):
         self.assertTrue(_is_runtime_path(PurePosixPath("requirements.txt")))
+        # The legacy script is replaced with a cleanup-only shim in existing installs.
         self.assertTrue(
             _is_runtime_path(PurePosixPath("core/python_weekly_update.ps1"))
         )
