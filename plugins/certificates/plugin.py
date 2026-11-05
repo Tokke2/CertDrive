@@ -77,7 +77,7 @@ from .counter_security import CounterPinStore
 from .customers import Customer, load_customers, save_customers
 from .history import find_duplicate_certificates, registration_from_values, vin_from_values
 from .label_mappings import load_label_mappings, save_label_mappings
-from .layout import field_group
+from .layout import FIELD_GROUP_ORDER, field_group
 from .printer_settings import (
     default_printer,
     installed_printers,
@@ -2247,8 +2247,14 @@ class Plugin:
             )
             field.value_changed.connect(self._on_field_value_changed)
             self._field_widgets.append(field)
-            grouped_fields.setdefault(field_group(field_name), []).append(field)
-        area.set_content(field_groups=list(grouped_fields.items()))
+            section = field_group(field_name, _field_label(field_name))
+            grouped_fields.setdefault(section, []).append(field)
+        ordered_groups = [
+            (section, grouped_fields[section])
+            for section in FIELD_GROUP_ORDER
+            if section in grouped_fields
+        ]
+        area.set_content(field_groups=ordered_groups)
         self._evt("cert.fields_built", f"{len(self._field_widgets)} fält byggda",
                   level=logging.DEBUG, fields=len(self._field_widgets),
                   auto=automatic_count, placeholders=len(placeholders))

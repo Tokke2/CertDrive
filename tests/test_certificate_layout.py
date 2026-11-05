@@ -46,8 +46,17 @@ class CertificateResponsiveLayoutTests(unittest.TestCase):
         group = _MODULE.field_group
         self.assertEqual(group("REGNR"), "Fordonsuppgifter")
         self.assertEqual(group("Fordonets årsmodell"), "Fordonsuppgifter")
+        self.assertEqual(group("MODEL_YEAR"), "Fordonsuppgifter")
+        self.assertEqual(group("HANDELSBETECKNING"), "Fordonsuppgifter")
+        self.assertEqual(group("TYPE_APPROVAL", "Typgodkännande"), "Intyg och kontroll")
         self.assertEqual(group("Intygsdatum"), "Intyg och kontroll")
         self.assertEqual(group("Kundkommentar"), "Övriga uppgifter")
+
+    def test_form_sections_use_vehicle_certificate_other_order(self):
+        self.assertEqual(
+            _MODULE.FIELD_GROUP_ORDER,
+            ("Fordonsuppgifter", "Intyg och kontroll", "Övriga uppgifter"),
+        )
 
 
 if __name__ == "__main__":

@@ -174,7 +174,9 @@ class FieldsScrollArea(QScrollArea):
 
     def _column_count(self) -> int:
         # QWidget widths are logical pixels; font height adds accessible scaling.
-        width = max(self.viewport().width(), self.width())
+        width = self.viewport().width()
+        if width <= 0:
+            width = self.width()
         font_height = self._content.fontMetrics().height()
         return field_column_count(width, font_height)
 
