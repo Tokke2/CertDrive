@@ -52,7 +52,7 @@ class LinuxAutostartTests(unittest.TestCase):
                 desktop = Path(config_home) / "autostart" / "intygsgenerator.desktop"
                 content = desktop.read_text(encoding="utf-8")
                 self.assertIn("[Desktop Entry]", content)
-                self.assertIn(f"Icon={repo_root / 'Icon' / 'icon.svg'}", content)
+                self.assertIn(f"Icon={repo_root / 'Icon' / 'icon.png'}", content)
                 self.assertIn("Terminal=false", content)
                 self.assertTrue(desktop.stat().st_mode & 0o100)
                 self.assertTrue(manager.is_enabled())

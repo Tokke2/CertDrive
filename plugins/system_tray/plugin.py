@@ -765,41 +765,24 @@ class Plugin:
     def _get_icon(
         self, state: IconState = IconState.NORMAL
     ) -> QIcon:
+        """Return the canonical application icon for every tray status."""
         with self._lock:
-            if state not in self._icon_cache:
-                # Use the exact application icon for the normal tray state;
-                # status/animation states may still use their purpose-built art.
-                if state is IconState.NORMAL:
-                    app = QApplication.instance()
-                    app_icon = app.windowIcon() if app is not None else QIcon()
-                    self._icon_cache[state] = (
-                        app_icon if not app_icon.isNull()
-                        else _load_icon(self._icon_folder, state)
-                    )
-                else:
-                    self._icon_cache[state] = _load_icon(
-                        self._icon_folder, state
-                    )
-            return self._icon_cache[state]
+            if not self._icon_cache:
+                app = QApplication.instance()
+                app_icon = app.windowIcon() if app is not None else QIcon()
+                if app_icon.isNull():
+                    app_icon = _load_icon(self._icon_folder, IconState.NORMAL)
+                if app_icon.isNull():
+                    app_icon = _generate_fallback_qicon(IconState.NORMAL)
+                self._icon_cache = {icon_state: app_icon for icon_state in IconState}
+            return self._icon_cache.get(state, self._icon_cache[IconState.NORMAL])
 
     def _ensure_animation_icons(self) -> None:
-        """Lazy: generera animationsikoner vid behov."""
+        """Keep the branded icon stable; busy status is conveyed by its tooltip."""
         with self._lock:
-            if self._animation_icons:
-                return
-        try:
-            frames = IconGenerator.create_animation_frames(
-                IconState.BUSY,
-                frame_count=8,
-                size=IconGenerator.get_platform_icon_size(),
-            )
-            icons = [_pil_to_qicon(f) for f in frames]
-            icons = [i for i in icons if not i.isNull()]
-            with self._lock:
-                self._animation_icons = icons
-        except Exception:
-            with self._lock:
-                self._animation_icons = []
+            if not self._animation_icons:
+                app_icon = self._get_icon(IconState.NORMAL)
+                self._animation_icons = [app_icon] * 8
 
     def _set_tray_icon(self, state: IconState) -> None:
         if self._tray is None:

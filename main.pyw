@@ -354,7 +354,7 @@ class AutostartGuard:
     # ── Linux: XDG .desktop ───────────────────────────────────────────────
     @staticmethod
     def _desktop_icon() -> str:
-        for name in ("icon.svg", "icon.png", "icon.ico"):
+        for name in ("icon.png", "icon.ico", "icon.svg"):
             path = APP_PATH / "Icon" / name
             if path.is_file():
                 return str(path)
@@ -595,9 +595,9 @@ def _load_app_icon() -> QIcon:
     """Ladda en högupplöst appikon eller använd en säker QPainter-fallback."""
     icon_folder = APP_PATH / FOLDER_ICONS
     for filename in (
-        "icon.svg",
         "icon.png",
         "icon.ico",
+        "icon.svg",
         "app.svg",
         "app.png",
         "app.ico",
@@ -791,27 +791,31 @@ class InstanceActivationServer(QObject):
     def notify_existing_instance(
         cls,
         name: str,
-        timeout_ms: int = 700,
+        timeout_ms: int = 5000,
     ) -> bool:
-        """Skicka ett kort aktiveringsmeddelande till första instansen."""
-        socket = QLocalSocket()
-        try:
-            socket.connectToServer(
-                _instance_channel_name(name),
-                QIODevice.OpenModeFlag.WriteOnly,
-            )
-            if not socket.waitForConnected(timeout_ms):
-                return False
-            socket.write(b"activate\n")
-            socket.flush()
-            socket.waitForBytesWritten(timeout_ms)
-            socket.disconnectFromServer()
-            return True
-        except Exception:
-            _logger.debug("Kunde inte signalera befintlig instans", exc_info=True)
-            return False
-        finally:
-            socket.deleteLater()
+        """Retry local IPC while the first window is still completing startup."""
+        channel = _instance_channel_name(name)
+        deadline = time.monotonic() + max(100, int(timeout_ms)) / 1000.0
+        while time.monotonic() < deadline:
+            socket = QLocalSocket()
+            try:
+                socket.connectToServer(channel, QIODevice.OpenModeFlag.WriteOnly)
+                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+                if socket.waitForConnected(min(300, remaining_ms)):
+                    payload = b"activate\n"
+                    if socket.write(payload) == len(payload):
+                        socket.flush()
+                        written = socket.waitForBytesWritten(min(300, remaining_ms))
+                        if written or socket.bytesToWrite() == 0:
+                            socket.disconnectFromServer()
+                            return True
+            except Exception:
+                _logger.debug("Kunde inte signalera befintlig instans ännu", exc_info=True)
+            finally:
+                socket.abort()
+                socket.deleteLater()
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        return False
 
     @Slot()
     def _on_new_connection(self) -> None:

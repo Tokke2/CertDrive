@@ -64,7 +64,7 @@ IS_FROZEN: Final[bool] = bool(getattr(sys, "frozen", False) or hasattr(sys, "_ME
 
 CONFIG_FILENAME: Final[str] = "generator_settings.json"
 CONFIG_DIR_NAME: Final[str] = "js"
-APP_ICON_PATH: Final[Path] = Path(__file__).resolve().parents[2] / "Icon" / "icon.svg"
+APP_ICON_PATH: Final[Path] = Path(__file__).resolve().parents[2] / "Icon" / "icon.png"
 
 UnsubscribeFunc = Callable[[], None]
 

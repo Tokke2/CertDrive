@@ -570,8 +570,14 @@ class Plugin:
                 return icon
         except Exception:
             pass
-        app_icon = Path(__file__).resolve().parents[2] / "Icon" / "icon.svg"
-        return QIcon(str(app_icon))
+        icon_folder = Path(__file__).resolve().parents[2] / "Icon"
+        for filename in ("icon.png", "icon.ico", "icon.svg"):
+            app_icon = icon_folder / filename
+            if app_icon.is_file():
+                icon = QIcon(str(app_icon))
+                if not icon.isNull():
+                    return icon
+        return QIcon()
 
     def _evt(self, event: str, msg: str, level: int = logging.INFO, **ctx: Any) -> None:
         """Strukturerad loggpost (cert.*) — får aldrig krascha appen."""

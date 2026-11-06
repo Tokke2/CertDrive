@@ -1191,9 +1191,11 @@ class AutostartManager:
                 ).resolve()
                 exec_cmd = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
 
-            icon_path = self.app_path / FOLDER_ICONS / "icon.svg"
+            icon_path = self.app_path / FOLDER_ICONS / "icon.png"
             if not icon_path.is_file():
-                icon_path = self.app_path / FOLDER_ICONS / "icon.png"
+                icon_path = self.app_path / FOLDER_ICONS / "icon.ico"
+            if not icon_path.is_file():
+                icon_path = self.app_path / FOLDER_ICONS / "icon.svg"
             content = (
                 "[Desktop Entry]\n"
                 "Type=Application\n"
