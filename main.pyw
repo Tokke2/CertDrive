@@ -2246,10 +2246,15 @@ class Application:
             set_defaults = getattr(self._config, "ensure_defaults", None)
         if callable(set_defaults):
             set_defaults(defaults)
-            return
-        for key, value in defaults.items():
-            if self.config_value(key, None) is None:
-                self.set_config_value(key, value, auto_save=False)
+        else:
+            for key, value in defaults.items():
+                if self.config_value(key, None) is None:
+                    self.set_config_value(key, value, auto_save=False)
+
+        # This is an application behavior, not an optional startup preference.
+        # Migrate older profiles that explicitly stored False as well.
+        if not bool(self.config_value("app.start_minimized", True)):
+            self.set_config_value("app.start_minimized", True, auto_save=True)
 
     def _setup_qapp(self) -> None:
         self.qapp = QApplication.instance() or QApplication(sys.argv)
@@ -2397,30 +2402,22 @@ class Application:
             QTimer.singleShot(0, self._emit_ready_events)
 
     def _apply_start_visibility(self) -> None:
+        """Always start in the tray, or minimized to the taskbar if unavailable."""
         if self.window is None:
             return
-        start_minimized = bool(self.config_value("app.start_minimized", True))
-        if start_minimized and self.is_tray_available():
-            self._maximize_after_show()
+
+        if bool(self.config_value("window.start_maximized", True)):
+            # Preserve the preferred restore state without showing the window.
+            self.window.setWindowState(Qt.WindowState.WindowMaximized)
+
+        if self.is_tray_available():
             self.window.hide_signal.emit()
             return
-        if start_minimized:
-            _logger.warning("Systemfältet saknas — huvudfönstret visas i stället")
-        self._maximize_after_show()
-        self.window.show_signal.emit()
 
-    def _maximize_after_show(self) -> None:
-        """10.11.0: maximera efter att fönstret visats (säkrast i Qt, särskilt
-        från tray och vid uppstart minimerat)."""
-
-        def _run() -> None:
-            with suppress(Exception):
-                if self.window is not None and bool(
-                    self.config_value("window.start_maximized", True)
-                ):
-                    self.window.showMaximized()
-
-        QTimer.singleShot(0, _run)
+        _logger.warning(
+            "Systemfältet saknas — huvudfönstret startar minimerat till aktivitetsfältet"
+        )
+        self.window.showMinimized()
 
     def _setup_signals(self) -> None:
         def handle_signal(_signal_number: int, _frame: Any) -> None:

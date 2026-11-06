@@ -373,7 +373,7 @@ class Plugin:
     SETTING_DEFINITIONS: list[SettingDefinition] = [
         SettingDefinition("app.start_with_os", "Starta med operativsystemet", "Startar programmet automatiskt vid datorstart", "bool", True, section="startup", tooltip="Registrerar programmet i operativsystemets autostart."),
         SettingDefinition("app.tray.minimize_to_tray", "Minimera till systemfältet", "Dölj fönstret vid minimering och visa det bara som ikon i systemfältet.", "bool", True, section="startup", icon="📥"),
-        SettingDefinition("app.start_minimized", "Starta minimerad", "Starta programmet i systemfältet.", "bool", True, section="startup", icon="🔽"),
+        SettingDefinition("app.start_minimized", "Starta alltid minimerad", "IntygsDrive startar dolt i systemfältet, eller minimerat till aktivitetsfältet om systemfältet saknas.", "bool", True, section="startup", icon="🔽"),
         SettingDefinition("app.tray.show_notifications", "Visa tray-notifieringar", "Visa notifieringar från systemfältet.", "bool", True, section="startup", icon="🔔"),
         SettingDefinition("app.tray.single_click_open", "Enkelklick öppnar fönstret", "Öppna fönstret med enkelklick på tray-ikonen.", "bool", True, section="startup"),
         SettingDefinition("app.confirm_exit", "Bekräfta avslut", "Fråga innan programmet avslutas via meny.", "bool", True, section="startup"),
@@ -1248,7 +1248,18 @@ class Plugin:
         return [definition for definition in self.SETTING_DEFINITIONS if definition.section == section]
 
     def _add_setting_widget(self, layout: QVBoxLayout, definition: SettingDefinition) -> None:
-        control = add_setting_control(layout, definition, self.get_setting(definition.key, definition.default), lambda key, value: self.set_setting(key, value), self._setting_widgets)
+        value = self.get_setting(definition.key, definition.default)
+        if definition.key == "app.start_minimized":
+            value = True
+        control = add_setting_control(
+            layout,
+            definition,
+            value,
+            lambda key, value: self.set_setting(key, value),
+            self._setting_widgets,
+        )
+        if definition.key == "app.start_minimized":
+            control.setEnabled(False)
         dependency = definition.depends_on
         if dependency:
             control.setEnabled(bool(self.get_setting(dependency, False)))
