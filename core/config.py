@@ -849,6 +849,59 @@ def _windows_startup_shortcut_path() -> Path:
     return _windows_startup_folder() / _WINDOWS_SHORTCUT_NAME
 
 
+def _windows_startup_vbs_path() -> Path:
+    roaming = os.environ.get("APPDATA")
+    base = Path(roaming) if roaming else Path.home() / "AppData" / "Roaming"
+    return base / "IntygsDrive" / "autostart.vbs"
+
+
+def _vbs_string(value: str) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
+
+
+def _build_vbs_launcher(target: str, arguments: list[str], working_directory: str) -> str:
+    """Return a WSH script that starts a command hidden, without pythonw.exe."""
+    parts = [f"Chr(34) & {_vbs_string(target)} & Chr(34)"]
+    parts.extend(
+        f"Chr(34) & {_vbs_string(argument)} & Chr(34)" for argument in arguments
+    )
+    command = ' & " " & '.join(parts)
+    lines = (
+        "Option Explicit",
+        "Dim shell, command",
+        'Set shell = CreateObject("WScript.Shell")',
+        f"shell.CurrentDirectory = {_vbs_string(working_directory)}",
+        f"command = {command}",
+        "shell.Run command, 0, False",
+    )
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _write_windows_vbs_launcher(
+    target: str,
+    arguments: list[str],
+    working_directory: str,
+    path: Path | None = None,
+) -> Path:
+    """Write the per-user hidden VBS launcher in UTF-16 for Windows Script Host."""
+    launcher = path or _windows_startup_vbs_path()
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    temporary = launcher.with_suffix(launcher.suffix + ".tmp")
+    temporary.write_bytes(
+        _build_vbs_launcher(target, arguments, working_directory).encode("utf-16")
+    )
+    temporary.replace(launcher)
+    return launcher
+
+
+def _wscript_executable() -> str:
+    windows = Path(os.environ.get("WINDIR") or os.environ.get("SYSTEMROOT") or r"C:\Windows")
+    candidate = windows / "System32" / "wscript.exe"
+    if candidate.is_file():
+        return str(candidate)
+    return shutil.which("wscript.exe") or str(candidate)
+
+
 def _ps_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -891,11 +944,13 @@ def _create_windows_startup_shortcut(
 
 def _remove_windows_startup_shortcut() -> bool:
     shortcut = _windows_startup_shortcut_path()
-    try:
-        shortcut.unlink(missing_ok=True)
-        return True
-    except OSError:
-        return False
+    success = True
+    for path in (shortcut, _windows_startup_vbs_path()):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            success = False
+    return success
 
 
 class AutostartManager:
@@ -995,12 +1050,10 @@ class AutostartManager:
         if script is None:
             script = Path(sys.argv[0]).resolve()
 
-        interpreter = sys.executable
-        if _is_windows():
-            pythonw = Path(interpreter).parent / "pythonw.exe"
-            if pythonw.is_file():
-                interpreter = str(pythonw)
-        return [interpreter, str(script)]
+        interpreter = Path(sys.executable)
+        if _is_windows() and interpreter.name.casefold() == "pythonw.exe":
+            interpreter = interpreter.with_name("python.exe")
+        return [str(interpreter), str(script)]
 
     def get_command(self) -> str:
         """Returnera startkommando; Windows-genvägen får appens egen ikon."""
@@ -1057,9 +1110,26 @@ class AutostartManager:
             if not args or not icon_path.is_file():
                 self._log.error("[Autostart] Windows shortcut needs app command and Icon/icon.ico")
                 return False
+            target = args[0]
+            shortcut_arguments = subprocess.list2cmdline(args[1:])
+            if not (getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS")):
+                interpreter = Path(args[0])
+                if interpreter.name.casefold() == "pythonw.exe" or not interpreter.is_file():
+                    self._log.error(
+                        "[Autostart] VBS launcher needs an existing python.exe: %s",
+                        interpreter,
+                    )
+                    return False
+                launcher = _write_windows_vbs_launcher(
+                    str(interpreter), args[1:], str(self.app_path)
+                )
+                target = _wscript_executable()
+                shortcut_arguments = subprocess.list2cmdline(
+                    ["//B", "//NoLogo", str(launcher)]
+                )
             created = _create_windows_startup_shortcut(
-                target=args[0],
-                arguments=subprocess.list2cmdline(args[1:]),
+                target=target,
+                arguments=shortcut_arguments,
                 working_directory=str(self.app_path),
                 icon_path=str(icon_path),
             )

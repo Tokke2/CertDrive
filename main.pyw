@@ -238,19 +238,10 @@ class AutostartGuard:
         if getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
             return [str(Path(sys.executable).resolve())]
 
-        if _IS_WINDOWS and (APP_PATH / "js" / "python-runtime-ready.txt").is_file():
-            manager = shutil.which("pymanager.exe") or shutil.which("pymanager")
-            pythonw_launcher = shutil.which("pyw.exe") or shutil.which("pyw")
-            if manager and pythonw_launcher:
-                return [pythonw_launcher, "-V:default", str(Path(__file__).resolve())]
-
-        interpreter = sys.executable
-        if _IS_WINDOWS:
-            # pythonw undviker konsolfönster men behåller python.exe som fallback.
-            pythonw = Path(interpreter).with_name("pythonw.exe")
-            if pythonw.is_file():
-                interpreter = str(pythonw)
-        return [interpreter, str(Path(__file__).resolve())]
+        interpreter = Path(sys.executable)
+        if _IS_WINDOWS and interpreter.name.casefold() == "pythonw.exe":
+            interpreter = interpreter.with_name("python.exe")
+        return [str(interpreter), str(Path(__file__).resolve())]
 
     @classmethod
     def _command(cls) -> str:
@@ -278,6 +269,8 @@ class AutostartGuard:
             _create_windows_startup_shortcut,
             _remove_windows_startup_shortcut,
             _windows_startup_shortcut_path,
+            _write_windows_vbs_launcher,
+            _wscript_executable,
         )
 
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -302,9 +295,28 @@ class AutostartGuard:
             _evt("autostart.icon_missing", "Autostart-genväg saknar appkommando eller Icon/icon.ico",
                  level=logging.ERROR, icon=str(icon_path))
             return
+        target = args[0]
+        shortcut_arguments = subprocess.list2cmdline(args[1:])
+        if not (getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS")):
+            interpreter = Path(args[0])
+            if interpreter.name.casefold() == "pythonw.exe" or not interpreter.is_file():
+                _evt(
+                    "autostart.python_executable_missing",
+                    "Windows-autostart kräver tillgänglig python.exe och använder inte pythonw.exe",
+                    level=logging.ERROR,
+                    executable=str(interpreter),
+                )
+                return
+            launcher = _write_windows_vbs_launcher(
+                str(interpreter), args[1:], str(APP_PATH)
+            )
+            target = _wscript_executable()
+            shortcut_arguments = subprocess.list2cmdline(
+                ["//B", "//NoLogo", str(launcher)]
+            )
         created = _create_windows_startup_shortcut(
-            target=args[0],
-            arguments=subprocess.list2cmdline(args[1:]),
+            target=target,
+            arguments=shortcut_arguments,
             working_directory=str(APP_PATH),
             icon_path=str(icon_path),
         )
@@ -485,6 +497,8 @@ try:
         QMessageBox,
         QProgressBar,
         QPushButton,
+        QScrollArea,
+        QSizePolicy,
         QStatusBar,
         QStyle,
         QSystemTrayIcon,
@@ -891,8 +905,15 @@ class MainWindow(QMainWindow):
         self._icon = icon
         self.setWindowTitle(APP_DISPLAY_NAME)
         self.setWindowIcon(icon)
-        # 10.8.0: adaptiva minimått (DPI/fontmetrik, §17/§30).
-        self.setMinimumSize(_scale(760), _scale(560))
+        # Responsive minimums stay within the available display on small screens.
+        minimum_width = _scale(760)
+        minimum_height = _scale(560)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            minimum_width = min(minimum_width, max(420, available.width()))
+            minimum_height = min(minimum_height, max(320, available.height()))
+        self.setMinimumSize(minimum_width, minimum_height)
         self.resize(1120, 760)
         self.setAccessibleName(APP_DISPLAY_NAME)
         self._build_menu()
@@ -1144,7 +1165,11 @@ class MainWindow(QMainWindow):
                 continue
             seen_names.add(name)
             loaded = widget is not None
-            tab_widget = widget if loaded else self._make_lazy_tab_placeholder(name)
+            tab_widget = (
+                self._responsive_tab_surface(name, widget)
+                if loaded
+                else self._make_lazy_tab_placeholder(name)
+            )
             records.append(
                 _TabRecord(name, tab_widget, self._tab_icon(name), loaded=loaded)
             )
@@ -1234,6 +1259,25 @@ class MainWindow(QMainWindow):
             self._syncing_tabs = False
         self._queue_selected_plugin_tab_mount()
 
+    def _responsive_tab_surface(self, name: str, widget: QWidget) -> QWidget:
+        """Give every plugin tab consistent overflow and resize behavior."""
+        widget.setMinimumSize(0, 0)
+        widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        if isinstance(widget, QScrollArea):
+            surface = widget
+        else:
+            surface = QScrollArea(self._tabs)
+            surface.setWidget(widget)
+        surface.setWidgetResizable(True)
+        surface.setFrameShape(QFrame.Shape.NoFrame)
+        surface.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        surface.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        surface.setAccessibleName(f"{name} – anpassningsbar flik")
+        return surface
+
     def _make_lazy_tab_placeholder(self, name: str) -> QWidget:
         """Create a cheap tab surface; the plugin widget is built on first use."""
         page = QWidget(self._tabs)
@@ -1288,6 +1332,7 @@ class MainWindow(QMainWindow):
                 message.setText(f"Fliken {record.name} kunde inte laddas. Se loggarna.")
             return
 
+        widget = self._responsive_tab_surface(record.name, widget)
         index = self._tabs.indexOf(record.widget)
         if index < 0:
             record.loaded = True
@@ -1725,8 +1770,15 @@ class MainWindow(QMainWindow):
             and self.isMinimized()
             and not self._app.is_exiting
             and self._app.is_tray_available()
-            and bool(self._app.config_value("app.tray.minimize_to_tray",
-                                            self._app.config_value("app.minimize_to_tray", True)))
+            and bool(
+                self._app.config_value(
+                    "tray.minimize_to_tray",
+                    self._app.config_value(
+                        "app.tray.minimize_to_tray",
+                        self._app.config_value("app.minimize_to_tray", True),
+                    ),
+                )
+            )
         ):
             QTimer.singleShot(0, self._hide_minimized_window)
 
@@ -1741,8 +1793,13 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         close_to_tray = bool(
-            self._app.config_value("app.close_to_tray",
-                                   self._app.config_value("app.tray.close_to_tray", True))
+            self._app.config_value(
+                "tray.close_to_tray",
+                self._app.config_value(
+                    "app.close_to_tray",
+                    self._app.config_value("app.tray.close_to_tray", True),
+                ),
+            )
         )
         if self._app.is_tray_available() and close_to_tray:
             event.ignore()
@@ -2463,7 +2520,6 @@ class Application:
         # 10.8.0: erbjud installation av saknade tillägg när UI är redo.
         QTimer.singleShot(400, self._show_dependency_offer)
         # b-PAC erbjuds separat eftersom Brother kräver EULA-acceptans och UAC.
-        QTimer.singleShot(1600, self._offer_bpac_install_at_startup)
         # Ta bort äldre Python-underhållstask utan att köra en uppdatering.
         QTimer.singleShot(3500, self._remove_weekly_python_update_task)
         # Kontrollera vid start och därefter var tolfte timme (två gånger per dygn).
@@ -2775,14 +2831,6 @@ class Application:
             ),
             None,
         )
-
-    def _offer_bpac_install_at_startup(self) -> None:
-        if self.window is None or self._exit_requested:
-            return
-        plugin = self._certificate_plugin_for_menu()
-        action = getattr(plugin, "offer_bpac_setup_at_startup", None)
-        if callable(action):
-            action(self.window)
 
     def _manage_certificate_number(self) -> None:
         plugin = self._certificate_plugin_for_menu()

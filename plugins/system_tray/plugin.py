@@ -286,15 +286,9 @@ class _SettingsTab(QScrollArea):
         config = self._plugin._tray_config
 
         cb_start = QCheckBox()
-        cb_start.setChecked(
-            config.start_minimized if config else True
-        )
-        cb_start.toggled.connect(
-            lambda v: self._set(
-                "start_minimized", v, "app.start_minimized",
-            )
-        )
-        form.addRow("Starta minimerat:", cb_start)
+        cb_start.setChecked(True)
+        cb_start.setEnabled(False)
+        form.addRow("Starta alltid minimerad:", cb_start)
 
         cb_close = QCheckBox()
         cb_close.setChecked(

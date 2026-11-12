@@ -4,7 +4,7 @@ from __future__ import annotations
 """
 Fil:    plugins/certificates/plugin.py
 Sökväg: Intygsgenerator/plugins/certificates/plugin.py
-Version: 10.4.0 (uppgraderad från 10.3.0, 2026-09-25 — postetiketter på Brother QL-500 via b-PAC + Etiketter/*.lbx)
+Version: 10.4.0 — intygsgenerering, mallar och PDF-export
 
 Intygsgenerator — controller för mallskanning, intygsgenerering och PySide6 UI.
 
@@ -71,20 +71,10 @@ from PySide6.QtWidgets import (
 )
 
 from core.design_tokens import SHAPE, SPACING, scaled
-from . import labels as _labels
-from . import bpac_setup as _bpac_setup
 from .counter_security import CounterPinStore
 from .customers import Customer, load_customers, save_customers
 from .history import find_duplicate_certificates, registration_from_values, vin_from_values
-from .label_mappings import load_label_mappings, save_label_mappings
 from .layout import FIELD_GROUP_ORDER, field_group
-from .printer_settings import (
-    default_printer,
-    installed_printers,
-    inspect_printer,
-    load_printer_name,
-    save_printer_name,
-)
 from .view import (
     COPYRIGHT,
     EngineErrorWidget,
@@ -381,43 +371,6 @@ class _GenerationWorker(QRunnable):
             self.signals.error.emit(str(exc))
 
 
-class _LabelWorker(QRunnable):
-    """Skriver ut en .lbx-etikett via b-PAC i bakgrundstråd (10.4.0)."""
-
-    def __init__(
-        self,
-        label_path: Path,
-        copies: int,
-        values: dict[str, str],
-        printer_name: str = "",
-        calibration: bool = False,
-    ) -> None:
-        super().__init__()
-        self._label_path = label_path
-        self._copies = copies
-        self._values = values
-        self._printer_name = printer_name
-        self._calibration = calibration
-        self.signals = _WorkerSignals()
-        self.setAutoDelete(True)
-
-    @Slot()
-    def run(self) -> None:
-        try:
-            self.signals.finished.emit(
-                _labels.print_label(
-                    self._label_path,
-                    self._copies,
-                    self._values,
-                    printer_name=self._printer_name,
-                    calibration=self._calibration,
-                )
-            )
-        except Exception as exc:
-            _logger.exception("[CERTIFICATES] Etikettutskrift kraschade")
-            self.signals.error.emit(str(exc))
-
-
 class _BatchWorker(QRunnable):
     """Genererar batch i bakgrundstråden."""
 
@@ -494,7 +447,6 @@ class Plugin:
         self._templates_lock = threading.RLock()
         self._templates: dict[str, Any] = {}
         self._loaded = False
-        self._bpac_setup_prompted = False
         self._scan_active = False
         self._scan_requested = False
         self._scan_token = 0
@@ -510,11 +462,7 @@ class Plugin:
         self.output_path: Path | None = None
         self.config_path: Path | None = None
         self.customers_path: Path | None = None
-        self.label_mappings_path: Path | None = None
-        self.label_printer_settings_path: Path | None = None
         self._customers: list[Customer] = []
-        self._label_mappings: dict[str, str] = {}
-        self._label_printer_name = ""
         self._counter_manager: Any | None = None
         self._pdf_converter: Any | None = None
         self._generator: Any | None = None
@@ -529,18 +477,10 @@ class Plugin:
         self._fields_title: QLabel | None = None
         self._fields_area: FieldsScrollArea | None = None
         self._field_widgets: list[FieldWidget] = []
-        self._last_values: dict[str, str] = {}
         self._current_placeholders: list[str] = []
         self._generate_button: QPushButton | None = None
         self._batch_button: QPushButton | None = None
         self._customer_combo: QComboBox | None = None
-        self._label_mapping_combo: QComboBox | None = None
-        self._label_printer_button: QPushButton | None = None
-        self._label_printer_calibration_button: QPushButton | None = None
-        self._label_readiness_label: QLabel | None = None
-        self._label_print_checkbox: QCheckBox | None = None
-        self._pending_label_print = False
-        self._pending_template_name = ""
         self._progress_bar: QProgressBar | None = None
         self._progress_label: QLabel | None = None
 
@@ -685,9 +625,6 @@ class Plugin:
         self.output_path = self._context_path("output", base / _OUTPUT_ROOT_NAME)
         self.config_path = self._context_path("config", base / _CONFIG_ROOT_NAME)
         self.customers_path = self.config_path / "customers.json"
-        self.label_mappings_path = self.config_path / "certificate_label_mappings.json"
-        self.label_printer_settings_path = self.config_path / "label_printer.json"
-        self._label_printer_name = load_printer_name(self.label_printer_settings_path)
         self.templates_path = self._diagnose_templates_path(base, self.templates_path)
 
         for path in (self.templates_path, self.output_path, self.config_path):
@@ -704,14 +641,6 @@ class Plugin:
             self._log.error("[CERTIFICATES] Kundregistret kunde inte läsas: %s", exc)
             self._evt("customer.load_failed", f"Kundregistret kunde inte läsas: {exc}",
                       level=logging.ERROR, path=str(self.customers_path), error=str(exc))
-        try:
-            self._label_mappings = load_label_mappings(self.label_mappings_path)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            self._label_mappings = {}
-            self._log.error("[CERTIFICATES] Etikettkopplingar kunde inte läsas: %s", exc)
-            self._evt("label.mapping_load_failed", f"Etikettkopplingar kunde inte läsas: {exc}",
-                      level=logging.ERROR, path=str(self.label_mappings_path), error=str(exc))
-
     def _context_path(self, key: str, fallback: Path) -> Path:
         context = self._context
         getter = getattr(context, "get_path", None) if context is not None else None
@@ -1307,7 +1236,6 @@ class Plugin:
         outer.setSpacing(self._sp(SPACING.medium))
         outer.addWidget(self._build_status_row())
         outer.addWidget(self._build_template_selector())
-        outer.addWidget(self._build_label_mapping_row())
         outer.addWidget(self._build_template_info())
         outer.addWidget(self._build_fields_section(), stretch=1)
         outer.addWidget(self._build_action_row())
@@ -1469,347 +1397,6 @@ class Plugin:
             selected = gallery_list.currentItem()
             if selected is not None:
                 combo.setCurrentText(str(selected.data(Qt.ItemDataRole.UserRole) or ""))
-
-    def _build_label_mapping_row(self) -> QWidget:
-        frame = QFrame()
-        frame.setFrameShape(QFrame.Shape.StyledPanel)
-        frame.setProperty("designSurface", True)
-        layout = QHBoxLayout(frame)
-        layout.setContentsMargins(
-            self._sp(SPACING.medium), self._sp(SPACING.small),
-            self._sp(SPACING.medium), self._sp(SPACING.small),
-        )
-        layout.setSpacing(self._sp(SPACING.small))
-        layout.addWidget(QLabel("🏷️ Etikett för intygsmall:", frame))
-        self._label_mapping_combo = QComboBox(frame)
-        self._label_mapping_combo.setMinimumHeight(self._sp(23))
-        self._label_mapping_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._label_mapping_combo.currentIndexChanged.connect(self._on_label_mapping_changed)
-        layout.addWidget(self._label_mapping_combo, stretch=1)
-        self._label_print_checkbox = QCheckBox("Skriv etikett automatiskt", frame)
-        self._label_print_checkbox.setToolTip(
-            "Skriv alltid ut etiketten som är kopplad till intygsmallen efter att intyget skapats."
-        )
-        self._label_print_checkbox.toggled.connect(self._on_label_print_toggled)
-        self._label_print_checkbox.setEnabled(False)
-        layout.addWidget(self._label_print_checkbox)
-        self._label_readiness_label = QLabel("Kontrollerar etikett…", frame)
-        self._label_readiness_label.setMinimumWidth(0)
-        layout.addWidget(self._label_readiness_label)
-        self._label_printer_button = QPushButton(frame)
-        self._label_printer_button.setIcon(self._standard_icon("SP_PrinterIcon"))
-        self._label_printer_button.setIconSize(QSize(self._sp(16), self._sp(16)))
-        self._label_printer_button.clicked.connect(self._choose_label_printer)
-        layout.addWidget(self._label_printer_button)
-        self._label_printer_calibration_button = QPushButton("Kalibrera", frame)
-        self._label_printer_calibration_button.setIcon(self._standard_icon("SP_DialogApplyButton"))
-        self._label_printer_calibration_button.setIconSize(QSize(self._sp(15), self._sp(15)))
-        self._label_printer_calibration_button.setToolTip(
-            "Skriv ut ett kalibreringsmönster på vald etikettmall utan att skapa ett intyg."
-        )
-        self._label_printer_calibration_button.clicked.connect(self._calibrate_label_printer)
-        layout.addWidget(self._label_printer_calibration_button)
-        self._refresh_label_mapping_combo(self._last_selected_name)
-        self._refresh_label_printer_button()
-        return frame
-
-    def _refresh_label_printer_button(self) -> None:
-        button = self._label_printer_button
-        if button is None:
-            return
-        selected = self._label_printer_name or "Windows standard"
-        compact_name = selected if len(selected) <= 20 else f"{selected[:19]}…"
-        button.setText(f"Skrivare: {compact_name}")
-        button.setMaximumWidth(self._sp(220))
-        button.setToolTip(
-            f"Vald etikettskrivare: {selected}. Klicka för att välja en annan Windows-skrivare. "
-            "Skrivaren och dess drivrutin måste först vara installerade i Windows."
-        )
-
-    def _choose_label_printer(self) -> None:
-        printers = installed_printers()
-        system_default = default_printer()
-        if system_default and system_default.casefold() not in {name.casefold() for name in printers}:
-            printers.append(system_default)
-            printers.sort(key=str.casefold)
-        if not printers and not self._label_printer_name:
-            QMessageBox.information(
-                self._tab_widget,
-                "Etikettskrivare",
-                "Inga skrivare hittades i Windows. Installera skrivaren och dess drivrutin "
-                "i Windows först och välj sedan Skrivare igen.\n\n"
-                "För Brother .lbx-etiketter krävs även Brother b-PAC.",
-            )
-            return
-
-        choices: list[tuple[str, str]] = [
-            (
-                f"Windows standardskrivare ({system_default})"
-                if system_default else "Windows standardskrivare",
-                "",
-            )
-        ]
-        choices.extend((name, name) for name in printers)
-        if self._label_printer_name and self._label_printer_name.casefold() not in {
-            name.casefold() for name in printers
-        }:
-            choices.append((f"{self._label_printer_name} (inte hittad)", self._label_printer_name))
-        labels = [label for label, _name in choices]
-        selected_index = next(
-            (index for index, (_label, name) in enumerate(choices)
-             if name.casefold() == self._label_printer_name.casefold()),
-            0,
-        )
-        selected, accepted = QInputDialog.getItem(
-            self._tab_widget,
-            "Välj etikettskrivare",
-            "Välj en skrivare installerad i Windows. Brother .lbx kräver Brother b-PAC:",
-            labels,
-            selected_index,
-            False,
-        )
-        if not accepted:
-            return
-        printer_name = choices[labels.index(selected)][1]
-        if self.label_printer_settings_path is not None:
-            try:
-                save_printer_name(self.label_printer_settings_path, printer_name)
-            except OSError as exc:
-                QMessageBox.warning(
-                    self._tab_widget,
-                    "Etikettskrivare",
-                    f"Skriverval kunde inte sparas: {exc}",
-                )
-                self._evt(
-                    "label.printer_save_failed",
-                    f"Skriverval kunde inte sparas: {exc}",
-                    level=logging.ERROR,
-                    error=str(exc),
-                )
-                return
-        self._label_printer_name = printer_name
-        self._refresh_label_printer_button()
-        selected_name = printer_name or "Windows standardskrivare"
-        self._evt(
-            "label.printer_selected",
-            f"Etikettskrivare vald: {selected_name}",
-            printer=selected_name,
-        )
-        self._update_label_print_option()
-
-    def _calibrate_label_printer(self) -> None:
-        inspection = inspect_printer(self._label_printer_name)
-        if not inspection.ready:
-            QMessageBox.warning(
-                self._tab_widget,
-                "Etikettkalibrering",
-                f"Skrivaren är inte redo.\n\n{inspection.message}\n\n"
-                f"Drivrutin: {inspection.driver or 'saknas'}",
-            )
-            self._evt(
-                "label.calibration_prerequisite_failed",
-                f"Kalibrering kan inte starta: {inspection.message}",
-                level=logging.WARNING,
-                printer=inspection.name,
-                driver=inspection.driver,
-            )
-            return
-        if not _labels.bpac_available():
-            QMessageBox.warning(
-                self._tab_widget,
-                "Etikettkalibrering",
-                "Windows hittar skrivaren, men Brother b-PAC saknas. Installera b-PAC "
-                "för att skriva ut .lbx-etiketter.",
-            )
-            return
-        template_name, _template = self._selected_template()
-        mapped_label = self._mapped_label_path(template_name)
-        if mapped_label is None:
-            available_labels = _labels.find_labels(_labels.label_folder(self.templates_path))
-            if not available_labels:
-                QMessageBox.information(
-                    self._tab_widget,
-                    "Etikettkalibrering",
-                    "Windows kan öppna skrivaren och drivrutinen är installerad, men ingen "
-                    ".lbx-etikettmall hittades i mappen Etiketter/.",
-                )
-                return
-            if len(available_labels) == 1:
-                mapped_label = available_labels[0]
-            else:
-                display_names = [f"{path.stem} — {path.name}" for path in available_labels]
-                selected, accepted = QInputDialog.getItem(
-                    self._tab_widget,
-                    "Välj kalibreringsetikett",
-                    "Välj vilken .lbx-mall som ska kalibreras (inget intyg skapas):",
-                    display_names,
-                    0,
-                    False,
-                )
-                if not accepted:
-                    return
-                mapped_label = available_labels[display_names.index(selected)]
-        answer = QMessageBox.question(
-            self._tab_widget,
-            "Skriv ut kalibreringsmönster",
-            f"Skriv ut ett kalibreringsmönster med mallen {mapped_label.name}?\n\n"
-            "Alla redigerbara textfält ersätts tillfälligt med en numrerad testskala. "
-            "Inga formulärvärden eller intyg används; statiskt innehåll i LBX-mallen "
-            "lämnas kvar. En etikett förbrukas.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._start_label_print(mapped_label, 1, {}, calibration=True)
-
-    def _refresh_label_mapping_combo(self, template_name: str) -> None:
-        combo = self._label_mapping_combo
-        if combo is None:
-            return
-        labels = _labels.find_labels(_labels.label_folder(self.templates_path))
-        combo.blockSignals(True)
-        combo.clear()
-        if not labels:
-            combo.addItem("Inga etikettmallar hittades i Etiketter/", "")
-            combo.setEnabled(False)
-            combo.setToolTip("Lägg dina Brother .lbx-filer i mappen Etiketter/.")
-        elif not template_name:
-            combo.addItem("Välj en intygsmall först", "")
-            combo.setEnabled(False)
-            combo.setToolTip("Välj en intygsmall för att koppla dess etikett.")
-        else:
-            combo.addItem("Välj etikettmall…", "")
-            for label in labels:
-                combo.addItem(label.stem, label.name)
-            mapped_name = self._label_mappings.get(template_name, "")
-            selected_index = combo.findData(mapped_name) if mapped_name else -1
-            combo.setCurrentIndex(selected_index if selected_index >= 0 else 0)
-            combo.setEnabled(True)
-            if selected_index >= 0:
-                combo.setToolTip(
-                    f"{mapped_name} skrivs ut för intygsmallen {template_name}."
-                )
-            else:
-                combo.setToolTip(
-                    f"Välj vilken .lbx-etikett som hör till intygsmallen {template_name}. "
-                    "Automatisk etikettutskrift är avstängd tills en mall har valts."
-                )
-        combo.blockSignals(False)
-        self._update_label_print_option()
-
-    def _mapped_label_path(self, template_name: str | None) -> Path | None:
-        label_name = self._label_mappings.get(str(template_name or ""), "")
-        if not label_name:
-            return None
-        return next(
-            (path for path in _labels.find_labels(_labels.label_folder(self.templates_path))
-             if path.name.casefold() == label_name.casefold()),
-            None,
-        )
-
-    def _persist_label_mappings(self) -> bool:
-        if self.label_mappings_path is None:
-            return False
-        try:
-            save_label_mappings(self.label_mappings_path, self._label_mappings)
-            return True
-        except OSError as exc:
-            self._log.exception("[CERTIFICATES] Etikettkopplingar kunde inte sparas")
-            self._evt("label.mapping_save_failed", f"Etikettkopplingar kunde inte sparas: {exc}",
-                      level=logging.ERROR, path=str(self.label_mappings_path), error=str(exc))
-            self._set_status(f"⚠️ Etikettkopplingen kunde inte sparas: {exc}")
-            return False
-
-    @Slot(int)
-    def _on_label_mapping_changed(self, _index: int = -1) -> None:
-        combo = self._label_mapping_combo
-        template_name, template = self._selected_template()
-        if combo is None or template is None:
-            return
-        label_name = str(combo.currentData() or "")
-        previous = dict(self._label_mappings)
-        if label_name:
-            self._label_mappings[template_name] = label_name
-        else:
-            self._label_mappings.pop(template_name, None)
-        if not self._persist_label_mappings():
-            self._label_mappings = previous
-            self._refresh_label_mapping_combo(template_name)
-            return
-        self._evt("label.mapping_saved", f"Etikettkoppling sparad för {template_name}",
-                  template=template_name, label=label_name or "")
-        if label_name:
-            self._set_status(f"🏷️ {label_name} kopplad till intygsmallen {template_name}")
-        else:
-            self._set_status(f"Ingen etikettmall vald för {template_name}")
-        self._update_label_print_option()
-
-    @Slot(bool)
-    def _on_label_print_toggled(self, checked: bool) -> None:
-        """Keep automatic label printing enabled whenever it can be performed."""
-        if checked:
-            return
-        checkbox = self._label_print_checkbox
-        if checkbox is None:
-            return
-        template_name, _template = self._selected_template()
-        if (
-            not self._mapped_label_path(template_name)
-            or not _labels.bpac_available()
-            or not inspect_printer(self._label_printer_name).ready
-        ):
-            return
-        checkbox.blockSignals(True)
-        try:
-            checkbox.setChecked(True)
-        finally:
-            checkbox.blockSignals(False)
-
-    def _update_label_print_option(self) -> None:
-        checkbox = self._label_print_checkbox
-        if checkbox is None:
-            return
-        template_name, _template = self._selected_template()
-        mapped_label = self._mapped_label_path(template_name)
-        bpac_ready = _labels.bpac_available()
-        printer = inspect_printer(self._label_printer_name)
-        can_print = bool(mapped_label and bpac_ready and printer.ready)
-        checkbox.setEnabled(can_print)
-        checkbox.setChecked(can_print)
-        readiness = self._label_readiness_label
-        if readiness is not None:
-            if mapped_label is None:
-                status = "Etikettmall saknas"
-                detail = (
-                    f"Välj en .lbx-etikett för intygsmallen {template_name}."
-                    if template_name else "Välj en intygsmall och koppla en .lbx-etikett."
-                )
-            elif not bpac_ready:
-                status = "b-PAC saknas"
-                detail = "Installera Brother b-PAC för automatisk .lbx-utskrift."
-            elif not printer.ready:
-                status = "Skrivare ej redo"
-                detail = printer.message
-            else:
-                status = "Redo"
-                detail = f"{mapped_label.name}; drivrutin: {printer.driver}. {printer.message}"
-            readiness.setText(status)
-            readiness.setToolTip(detail)
-
-        if mapped_label is None:
-            checkbox.setToolTip(
-                f"Välj en etikettmall för intygsmallen {template_name} först."
-                if template_name else "Välj en intygsmall och koppla en etikettmall först."
-            )
-        elif not bpac_ready:
-            checkbox.setToolTip("Automatisk utskrift kräver Windows och Brother b-PAC.")
-        elif not printer.ready:
-            checkbox.setToolTip(f"Skrivaren är inte redo: {printer.message}")
-        else:
-            checkbox.setToolTip(
-                f"{mapped_label.name} skrivs automatiskt ut efter att intyget har skapats."
-            )
 
     def _refresh_customer_combo(self, selected_id: str | None = None) -> None:
         combo = self._customer_combo
@@ -2092,7 +1679,6 @@ class Plugin:
             self._select_template(combo.currentText(), force=True)
         else:
             self._last_selected_name = ""
-            self._refresh_label_mapping_combo("")
             self._clear_template_view()
             self._set_action_buttons_enabled(False)
 
@@ -2180,7 +1766,6 @@ class Plugin:
         if template is None:
             return
         self._last_selected_name = name
-        self._refresh_label_mapping_combo(name)
         self._evt("cert.template_selected", f"Mall vald: {name}", template=name)
         self._update_template_information(template)
         self._update_counter_label(template)
@@ -2499,11 +2084,6 @@ class Plugin:
         self._evt("cert.generate_started", f"Generering startad: {name}",
                   template=name, fields=len(values), recovery_key="certificate.generation")
         self._emit_event("certificate.before_generate", {"template": name, "values": values})
-        self._last_values = dict(values)  # tillgängliga som etikettfält
-        self._pending_template_name = name
-        self._pending_label_print = bool(
-            self._label_print_checkbox and self._label_print_checkbox.isChecked()
-        )
         generator = self._generator
         worker = _GenerationWorker(generator, template, values)
         worker.signals.progress.connect(self._on_generation_progress, Qt.ConnectionType.QueuedConnection)
@@ -2602,8 +2182,6 @@ class Plugin:
         self._show_progress(False)
         self._restore_action_buttons()
         if not _result_is_success(result):
-            self._pending_label_print = False
-            self._pending_template_name = ""
             error = str(_result_value(result, "error", "Okänt fel"))
             QMessageBox.critical(self._tab_widget, "Genereringsfel", error)
             self._log.error(
@@ -2660,322 +2238,20 @@ class Plugin:
             {"title": "Intyg skapat", "message": f"#{number} – {name}"},
         )
 
-        template_name = self._pending_template_name or name
-        mapped_label = self._mapped_label_path(template_name)
-        automatic_label_print = bool(self._pending_label_print and mapped_label)
-        self._pending_label_print = False
-        self._pending_template_name = ""
         box = QMessageBox(self._tab_widget)
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle("Intyg skapat")
-        message = (
+        box.setText(
             f"✅ Intyg #{number} skapades.\n\n📄 {filename}\n📑 {pages} sidor\n⏱️ {duration:.1f}s"
         )
-        if automatic_label_print and mapped_label is not None:
-            message += f"\n\n🏷️ Etiketten {mapped_label.name} skrivs ut."
-        box.setText(message)
         open_button = box.addButton("📄 Öppna PDF", QMessageBox.ButtonRole.AcceptRole)
-        label_button = None
-        if not automatic_label_print and _labels.find_labels(_labels.label_folder(self.templates_path)):
-            label_button = box.addButton("🏷️ Skriv etikett", QMessageBox.ButtonRole.ActionRole)
         box.addButton("Stäng", QMessageBox.ButtonRole.RejectRole)
         box.exec()
-        clicked = box.clickedButton()
-        if clicked is open_button and output_path:
+        if box.clickedButton() is open_button and output_path:
             self._open_path(Path(str(output_path)))
-        if automatic_label_print and mapped_label is not None:
-            self._start_label_print(mapped_label, 1, dict(self._last_values))
-        elif label_button is not None and clicked is label_button:
-            self._print_label_dialog(template_name=template_name)
-
-    def offer_bpac_setup_at_startup(self, parent: QWidget | None = None) -> None:
-        """Offer an approved, signature-verified b-PAC install at application startup."""
-        if self._bpac_setup_prompted:
-            return
-        self._bpac_setup_prompted = True
-        if sys.platform != "win32":
-            return
-        label_folder = _labels.label_folder(self.templates_path)
-        if not _labels.find_labels(label_folder):
-            return
-
-        available = _labels.bpac_available()
-        installed_version = _bpac_setup.installed_bpac_version() if available else None
-        version_comparison = (
-            _bpac_setup.compare_versions(installed_version, _bpac_setup.BPAC_TARGET_VERSION)
-            if installed_version
-            else None
-        )
-        if available and version_comparison is not None and version_comparison >= 0:
-            return
-
-        parent = parent or self._tab_widget
-        bits = _bpac_setup.application_bitness()
-        missing = not available
-        prompt = QMessageBox(parent)
-        prompt.setIcon(
-            QMessageBox.Icon.Information if missing else QMessageBox.Icon.Warning
-        )
-        prompt.setWindowTitle(
-            "Brother b-PAC saknas" if missing else "Brother b-PAC-uppdatering behövs"
-        )
-        if missing:
-            prompt.setText("Etikettmallar finns, men b-PAC Client Component är inte installerad.")
-            reason = "Installera b-PAC för att aktivera etikettutskrift."
-        elif installed_version:
-            prompt.setText(
-                f"Installerad b-PAC-version är {installed_version}; "
-                f"rekommenderad version är {_bpac_setup.BPAC_TARGET_VERSION}."
-            )
-            reason = "En uppdatering rekommenderas för att etikettutskriften ska fungera korrekt."
-        else:
-            prompt.setText("b-PAC finns, men den installerade versionen kunde inte läsas.")
-            reason = "Du kan kontrollera Brothers sida och installera den senaste signerade versionen."
-        prompt.setInformativeText(
-            f"{reason}\n\nAppen behöver Brother b-PAC {bits}-bitars för .lbx-etiketter. "
-            "Vill du hämta och installera/uppdatera Brother-komponenten nu?"
-        )
-        install_button = prompt.addButton(
-            "Hämta och installera…", QMessageBox.ButtonRole.AcceptRole
-        )
-        prompt.addButton("Inte nu", QMessageBox.ButtonRole.RejectRole)
-        prompt.setDefaultButton(install_button)
-        prompt.exec()
-        if prompt.clickedButton() is not install_button:
-            self._evt("label.bpac_setup_deferred", "b-PAC-installation sköts upp",
-                      level=logging.INFO, bitness=bits)
-            return
-
-        if not QDesktopServices.openUrl(QUrl(_bpac_setup.BPAC_DOWNLOAD_URL)):
-            QMessageBox.warning(
-                parent,
-                "Brother-sidan kunde inte öppnas",
-                "Öppna Brothers officiella b-PAC-sida manuellt och ladda ner "
-                "Client Component i rätt bitness.",
-            )
-            return
-        info = QMessageBox(parent)
-        info.setWindowTitle("Hämta b-PAC från Brother")
-        info.setText("Godkänn Brothers licens och hämta b-PAC Client Component.")
-        info.setInformativeText(
-            f"Välj {bits}-bitars Client Component (inte utvecklar-SDK:t). "
-            "När MSI-filen har hämtats väljer du den här. Appen kontrollerar "
-            "Brother-signaturen och MSI-arkitekturen innan Windows-installationen startas."
-        )
-        info.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
-        if info.exec() != QMessageBox.StandardButton.Ok:
-            return
-
-        installer_path, _selected_filter = QFileDialog.getOpenFileName(
-            parent,
-            "Välj hämtad Brother b-PAC Client Component",
-            str(Path.home() / "Downloads"),
-            "Windows Installer (*.msi)",
-        )
-        if not installer_path:
-            return
-        verified, verification_message = _bpac_setup.verify_bpac_msi(installer_path)
-        if not verified:
-            self._evt("label.bpac_installer_rejected", "b-PAC-installationsfilen avvisades",
-                      level=logging.WARNING, reason=verification_message)
-            QMessageBox.warning(parent, "Installationsfilen avvisades", verification_message)
-            return
-
-        confirm = QMessageBox(parent)
-        confirm.setIcon(QMessageBox.Icon.Warning)
-        confirm.setWindowTitle("Bekräfta b-PAC-installation")
-        confirm.setText("Brother-signaturen och appens bitness är verifierade.")
-        confirm.setInformativeText(
-            f"{verification_message}\n\nWindows kommer att fråga om "
-            "administratörsgodkännande innan installationen startar."
-        )
-        start_button = confirm.addButton(
-            "Starta installation", QMessageBox.ButtonRole.AcceptRole
-        )
-        confirm.addButton("Avbryt", QMessageBox.ButtonRole.RejectRole)
-        confirm.setDefaultButton(start_button)
-        confirm.exec()
-        if confirm.clickedButton() is not start_button:
-            return
-
-        app_root = (
-            self._context.base_path
-            if self._context is not None
-            else Path(__file__).resolve().parents[2]
-        )
-        launched, message = _bpac_setup.launch_bpac_msi_as_admin(
-            installer_path,
-            app_root=app_root,
-            parent_pid=int(QApplication.applicationPid()),
-        )
-        if not launched:
-            self._evt("label.bpac_installer_start_failed", "b-PAC-installationen startade inte",
-                      level=logging.WARNING, reason=message)
-            QMessageBox.warning(parent, "Installationen startade inte", message)
-            return
-        self._evt(
-            "label.bpac_installer_started",
-            "Brother b-PAC Client Component startades med UAC-godkännande",
-            level=logging.INFO,
-            installer=Path(installer_path).name,
-            bitness=bits,
-        )
-        QMessageBox.information(
-            parent,
-            "b-PAC-installationen startad",
-            "IntygsDrive stängs nu så att b-PAC kan uppdateras. Appen startas "
-            "automatiskt igen när Windows-installationen är klar. Om du avbryter "
-            "UAC startar appen ändå igen utan att b-PAC installeras.",
-        )
-        self._emit_event("app.quit", {"reason": "bpac_installation"})
-
-    # ── Etikettutskrift (QL-500 via b-PAC) ────────────────────────────────
-
-    def _print_label_dialog(
-        self,
-        template_name: str | None = None,
-    ) -> None:
-        """Use the selected template-to-label mapping, or choose a label once."""
-        folder = _labels.label_folder(self.templates_path)
-        labels = _labels.find_labels(folder)
-        if not labels:
-            QMessageBox.information(
-                self._tab_widget, "Etikett",
-                f"Inga etikettmallar (.lbx) hittades i:\n{folder}",
-            )
-            self._evt("label.none", "Inga .lbx-etiketter hittades", level=logging.WARNING,
-                      path=str(folder))
-            return
-        if not _labels.bpac_available():
-            QMessageBox.warning(
-                self._tab_widget, "Brother b-PAC saknas",
-                "För att skriva ut på QL-500 behövs Brother \"b-PAC Client Component\" "
-                "(64-bitars, samma som Python).\n\nHämta den gratis här:\n"
-                f"{_labels.BPAC_DOWNLOAD_URL}\n\nStarta om appen efter installationen.",
-            )
-            self._evt("label.bpac_missing", "b-PAC saknas — installation erbjuden",
-                      level=logging.WARNING, url=_labels.BPAC_DOWNLOAD_URL)
-            return
-
-        selected_template = template_name or self._last_selected_name
-        chosen = self._mapped_label_path(selected_template)
-        if chosen is None:
-            if len(labels) > 1:
-                display_names = [f"{path.stem} — {path.name}" for path in labels]
-                selected, ok = QInputDialog.getItem(
-                    self._tab_widget,
-                    "Etikett",
-                    f"Välj etikett för intygsmallen {selected_template or '(okänd)'}:",
-                    display_names,
-                    0,
-                    False,
-                )
-                if not ok:
-                    self._evt("label.cancelled", "Etikettutskrift avbruten", level=logging.DEBUG)
-                    return
-                chosen = labels[display_names.index(selected)]
-            else:
-                chosen = labels[0]
-
-        copies, ok = QInputDialog.getInt(
-            self._tab_widget, "Etikett", f"Antal etiketter ({chosen.stem}):", 1, 1, 99,
-        )
-        if not ok:
-            self._evt("label.cancelled", "Etikettutskrift avbruten", level=logging.DEBUG)
-            return
-        self._start_label_print(chosen, copies, dict(self._last_values))
-
-    def _start_label_print(
-        self,
-        chosen: Path,
-        copies: int,
-        values: dict[str, str],
-        *,
-        calibration: bool = False,
-    ) -> None:
-        printer_name = self._label_printer_name
-        printer_label = printer_name or "Windows standardskrivare"
-        event = "label.calibration_started" if calibration else "label.print_started"
-        message = (
-            f"Kalibrerar {chosen.name} på {printer_label}"
-            if calibration else f"Skriver ut {copies} × {chosen.name} på {printer_label}"
-        )
-        self._evt(
-            event,
-            message,
-            label=chosen.name,
-            copies=copies,
-            printer=printer_label,
-            recovery_key="label.calibration" if calibration else "label.print",
-        )
-        self._set_status(
-            f"🧭 Skriver ut kalibreringsmönster på {printer_label}…"
-            if calibration else f"🏷️ Skriver ut {copies} etikett(er) på {printer_label}…"
-        )
-        worker = _LabelWorker(chosen, copies, values, printer_name, calibration=calibration)
-        worker.signals.finished.connect(
-            lambda result, is_calibration=calibration: self._on_label_finished(
-                result, is_calibration
-            ),
-            Qt.ConnectionType.QueuedConnection,
-        )
-        worker.signals.error.connect(
-            lambda error, is_calibration=calibration: self._on_label_finished(
-                _labels.LabelResult(False, chosen.name, copies, error=error),
-                is_calibration,
-            ),
-            Qt.ConnectionType.QueuedConnection,
-        )
-        self._start_worker(worker)
-
-    @Slot(object)
-    def _on_label_finished(self, result: object, calibration: bool = False) -> None:
-        if not isinstance(result, _labels.LabelResult):
-            return
-        if result.ok:
-            if calibration:
-                self._set_status(f"✅ Kalibreringsmönster utskrivet: {result.label}")
-                self._evt(
-                    "label.calibration_printed",
-                    f"Kalibreringsmönster utskrivet: {result.label}",
-                    label=result.label,
-                    printer=self._label_printer_name or "Windows standardskrivare",
-                    fields_filled=len(result.filled),
-                    duration=round(result.duration, 2),
-                    recovery_key="label.calibration",
-                )
-                QMessageBox.information(
-                    self._tab_widget,
-                    "Kalibrering utskriven",
-                    "Kontrollera att sifferföljden är tydlig och inte avklippt, och att "
-                    "texten hamnar där den förväntas på etiketten. Vid förskjutning eller "
-                    "klippning justerar du etikettformat, marginaler eller skalning i "
-                    "Brother-drivrutinen/P-touch Editor och skriver sedan ut mönstret igen.\n\n"
-                    "Kalibreringen använder tillfälliga testvärden; intyg och mallfil ändras inte.",
-                )
-            else:
-                self._set_status(f"🏷️ {result.copies} etikett(er) utskrivna: {result.label}")
-                self._evt(
-                    "label.printed",
-                    f"Etikett utskriven: {result.copies} × {result.label}",
-                    label=result.label,
-                    copies=result.copies,
-                    filled=result.filled,
-                    duration=round(result.duration, 2),
-                    recovery_key="label.print",
-                )
-            return
-        self._set_status(f"❌ Etikettutskrift misslyckades: {result.label}")
-        event = "label.calibration_failed" if calibration else "label.print_failed"
-        self._evt(event, f"Etikettutskrift misslyckades: {result.error}",
-                  level=logging.ERROR, label=result.label, error=result.error,
-                  recovery_key="label.calibration" if calibration else "label.print")
-        QMessageBox.warning(self._tab_widget, "Etikett", result.error)
 
     @Slot(str)
     def _on_generation_error(self, error: str) -> None:
-        self._pending_label_print = False
-        self._pending_template_name = ""
         self._show_progress(False)
         self._restore_action_buttons()
         QMessageBox.critical(self._tab_widget, "Oväntat genereringsfel", error)

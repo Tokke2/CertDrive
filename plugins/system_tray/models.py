@@ -527,12 +527,19 @@ TOOLTIP_BUSY: str = get_tooltip_busy()
 # ─── TrayConfigHelper ────────────────────────────────────────────────────────
 
 
+class _TrayConfigMissing:
+    """Sentinel preserved by ConfigManager's defensive deepcopy behavior."""
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> "_TrayConfigMissing":
+        return self
+
+
 class TrayConfigHelper:
     """Hjälpklass för tray-konfiguration via ConfigManager."""
 
     DEFAULTS: dict[str, Any] = {
         "start_minimized": True,
-        "start_with_os": False,
+        "start_with_os": True,
         "close_to_tray": True,
         "minimize_to_tray": True,
         "show_notifications": True,
@@ -541,6 +548,16 @@ class TrayConfigHelper:
         "global_hotkey": DEFAULT_HOTKEY,
         "tab_visibility": {},
         "recent_certificates": [],
+    }
+    # Keep the tray panel, general settings panel, and older config files in sync.
+    CONFIG_ALIASES: dict[str, tuple[str, ...]] = {
+        "start_minimized": ("tray.start_minimized", "app.start_minimized", "app.tray.start_minimized"),
+        "start_with_os": ("tray.start_with_os", "app.start_with_os"),
+        "close_to_tray": ("tray.close_to_tray", "app.close_to_tray", "app.tray.close_to_tray"),
+        "minimize_to_tray": ("tray.minimize_to_tray", "app.tray.minimize_to_tray", "app.minimize_to_tray"),
+        "show_notifications": ("tray.show_notifications", "app.tray.show_notifications", "app.show_notifications"),
+        "show_minimize_notification": ("tray.show_minimize_notification", "app.tray.show_minimize_notification"),
+        "single_click_open": ("tray.single_click_open", "app.tray.single_click_open", "app.single_click_open"),
     }
 
     def __init__(self, config_manager: Any) -> None:
@@ -557,32 +574,41 @@ class TrayConfigHelper:
     def reload(self) -> None:
         self._load_cache()
 
+    @classmethod
+    def _config_keys(cls, key: str) -> tuple[str, ...]:
+        name = key.removeprefix("tray.")
+        return cls.CONFIG_ALIASES.get(name, (f"tray.{name}",))
+
     def _get_raw(self, key: str, default: Any = None) -> Any:
         if self._config is None:
             return default
         getter = getattr(self._config, "get", None)
         if not callable(getter):
             return default
-        try:
-            value = getter(key, default)
-            return value if value is not None else default
-        except Exception:
-            return default
+        missing = _TrayConfigMissing()
+        for config_key in self._config_keys(key):
+            try:
+                value = getter(config_key, missing)
+            except Exception:
+                continue
+            if value is not missing and value is not None:
+                return value
+        return default
 
     def _set_raw(self, key: str, value: Any) -> None:
         if self._config is None:
             return
-        full_key = key if key.startswith("tray.") else f"tray.{key}"
         setter = getattr(self._config, "set", None)
         if not callable(setter):
             return
         try:
-            setter(full_key, value)
+            for config_key in self._config_keys(key):
+                setter(config_key, value)
             saver = getattr(self._config, "save", None)
             if callable(saver):
                 saver()
         except Exception:
-            _logger.exception("Tray config skrivfel: %s", full_key)
+            _logger.exception("Tray config skrivfel: %s", key)
 
     def _get(self, key: str, default: Any = None) -> Any:
         with self._lock:

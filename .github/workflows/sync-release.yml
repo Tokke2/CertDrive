@@ -37,6 +37,7 @@ jobs:
           Source commit: \`${RELEASE_COMMIT}\`.
 
           The app version intentionally remains ${APP_VERSION} until the maintainer requests a version change.
+          The print-ready vector logo is included inside the app source at \`Icon/logo.svg\` and in the source-code release archive; it is not published as a separate download.
           The source app checks for updates at startup and every 12 hours while running. Downloaded code is staged automatically and installed after a normal app shutdown.
           EOF
 

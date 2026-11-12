@@ -1,5 +1,4 @@
-# Direct Python dependencies used by IntygsDrive; the weekly maintenance task
-# upgrades only these packages in Python Install Manager's default system runtime.
+# Direct Python dependencies used by IntygsDrive.
 PySide6
 Pillow
 PyPDF2

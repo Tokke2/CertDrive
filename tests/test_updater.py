@@ -218,6 +218,9 @@ class AutomaticUpdateStagingTests(unittest.TestCase):
             self.assertEqual(get_current_commit(root), "f" * 40)
             self.assertFalse((root / "js" / ".update-staging" / "pending.json").exists())
 
+    def test_print_ready_logo_is_part_of_the_app_release_runtime(self):
+        self.assertTrue(_is_runtime_path(PurePosixPath("Icon/logo.svg")))
+
     def test_legacy_python_task_cleanup_shim_is_allowlisted(self):
         self.assertTrue(_is_runtime_path(PurePosixPath("requirements.txt")))
         # The legacy script is replaced with a cleanup-only shim in existing installs.
