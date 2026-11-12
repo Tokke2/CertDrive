@@ -1012,13 +1012,6 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         self._add_action(
             tools_menu,
-            "Sök efter uppdateringar nu",
-            "SP_BrowserReload",
-            lambda: self._app._start_release_check(manual=True),
-        )
-        tools_menu.addSeparator()
-        self._add_action(
-            tools_menu,
             "Ändra nästa intygsnummer…",
             "SP_FileDialogContentsView",
             self._app._manage_certificate_number,
@@ -1031,6 +1024,13 @@ class MainWindow(QMainWindow):
         )
 
         help_menu = bar.addMenu("&Hjälp")
+        self._add_action(
+            help_menu,
+            "Sök efter uppdateringar nu",
+            "SP_BrowserReload",
+            lambda: self._app._start_release_check(manual=True),
+        )
+        help_menu.addSeparator()
         self._add_action(
             help_menu,
             f"Om {APP_DISPLAY_NAME}",
