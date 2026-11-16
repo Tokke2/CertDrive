@@ -48,6 +48,7 @@ from .engine import (
     Template,
     safe_filename,
 )
+from .history import synchronize_vin_values
 
 __version__: str = "10.3.0"
 __all__: list[str] = [
@@ -814,6 +815,9 @@ class CertificateGenerator:
                 progress("Hämtar löpnummer…", 10)
                 number = self._counters.increment(template_name, start=template.config.counter_start)
                 now = datetime.now()
+                values = synchronize_vin_values(
+                    values, getattr(template, "placeholders", ())
+                )
                 replacements = self._build_replacements(values, number, now)
 
                 with tempfile.TemporaryDirectory(prefix="intyg_") as raw_directory:

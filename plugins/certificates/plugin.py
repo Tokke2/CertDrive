@@ -73,7 +73,14 @@ from PySide6.QtWidgets import (
 from core.design_tokens import SHAPE, SPACING, scaled
 from .counter_security import CounterPinStore
 from .customers import Customer, load_customers, save_customers
-from .history import find_duplicate_certificates, registration_from_values, vin_from_values
+from .history import (
+    collapse_vin_fields,
+    find_duplicate_certificates,
+    is_vin_field_name,
+    registration_from_values,
+    synchronize_vin_values,
+    vin_from_values,
+)
 from .layout import FIELD_GROUP_ORDER, field_group
 from .view import (
     COPYRIGHT,
@@ -186,6 +193,8 @@ def _is_auto_field(field_name: str) -> bool:
 
 
 def _field_label(field_name: str) -> str:
+    if is_vin_field_name(field_name):
+        return "Chassinummer (VIN)"
     if callable(_engine_field_label):
         try:
             label = _engine_field_label(field_name)
@@ -250,17 +259,28 @@ def _template_user_fields(template: Any) -> list[str]:
 
 def _template_default(template: Any, field_name: str) -> str:
     method = _safe_get(template, "get_default", None)
-    if callable(method):
-        try:
-            return str(method(field_name) or "")
-        except Exception:
-            _logger.exception("[CERTIFICATES] Kunde inte läsa mallstandardvärde")
     config = _safe_get(template, "config", None)
     defaults = _safe_get(config, "default_values", {})
-    if isinstance(defaults, dict):
-        for key, value in defaults.items():
-            if str(key).casefold() == field_name.casefold():
-                return str(value)
+    candidates = [field_name]
+    if is_vin_field_name(field_name):
+        candidates.extend(str(name) for name in (_safe_get(template, "placeholders", []) or []))
+        candidates.extend(str(name) for name in (_safe_get(config, "extra_fields", []) or []))
+        if isinstance(defaults, dict):
+            candidates.extend(str(name) for name in defaults)
+    for candidate in dict.fromkeys(candidates):
+        if is_vin_field_name(field_name) and not is_vin_field_name(candidate):
+            continue
+        if callable(method):
+            try:
+                value = method(candidate)
+                if value not in (None, ""):
+                    return str(value)
+            except Exception:
+                _logger.exception("[CERTIFICATES] Kunde inte läsa mallstandardvärde")
+        if isinstance(defaults, dict):
+            for key, value in defaults.items():
+                if str(key).casefold() == candidate.casefold() and value not in (None, ""):
+                    return str(value)
     return ""
 
 
@@ -1338,7 +1358,7 @@ class Plugin:
         for name, template in templates:
             config = _safe_get(template, "config", None)
             category = str(_safe_get(config, "category", "") or "Mall")
-            fields = _template_user_fields(template)
+            fields = collapse_vin_fields(_template_user_fields(template))
             item = QListWidgetItem(f"{name}\n{category} · {len(fields)} fält", gallery_list)
             item.setData(Qt.ItemDataRole.UserRole, name)
             item.setToolTip(name)
@@ -1361,7 +1381,7 @@ class Plugin:
                     break
             if not description:
                 description = "Tälle mallille ei ole lisätty erillistä kuvausta."
-            fields = _template_user_fields(template)
+            fields = collapse_vin_fields(_template_user_fields(template))
             docx_name = Path(str(_safe_get(template, "docx_file", ""))).name or "DOCX-fil saknas"
             field_html = "<li>" + "</li><li>".join(html.escape(value) for value in fields) + "</li>" if fields else "<li>Inga manuella fält</li>"
             details.setHtml(
@@ -1783,7 +1803,7 @@ class Plugin:
         attachments = _template_attachments(template)
         if attachments:
             parts.append(f"📎 {attachments} bilagor")
-        parts.append(f"✏️ {len(_template_user_fields(template))} fält")
+        parts.append(f"✏️ {len(collapse_vin_fields(_template_user_fields(template)))} fält")
         if category:
             parts.append(f"🏷️ {category}")
         self._info_label.setText("  │  ".join(parts))
@@ -1796,7 +1816,7 @@ class Plugin:
         self._field_widgets.clear()
         placeholders = [str(value) for value in _safe_get(template, "placeholders", []) or []]
         self._current_placeholders = list(dict.fromkeys(placeholders))
-        fields = _template_user_fields(template)
+        fields = collapse_vin_fields(_template_user_fields(template))
         automatic_count = sum(1 for field_name in placeholders if _is_auto_field(field_name))
         if self._fields_title is not None:
             title = f"Uppgifter · {len(fields)} fält"
@@ -1817,7 +1837,7 @@ class Plugin:
         grouped_fields: dict[str, list[FieldWidget]] = {}
         for field_name in fields:
             upper = field_name.upper()
-            kind = "vin" if upper in {"VIN", "VINNUMMER", "CHASSI", "CHASSINUMMER"} else "reg" if upper in {"REG", "REGNR", "REGISTRERINGSNUMMER"} else ""
+            kind = "vin" if is_vin_field_name(field_name) else "reg" if upper in {"REG", "REGNR", "REGISTRERINGSNUMMER"} else ""
             validator: Callable[[str], Any] | None = None
             tooltip = ""
             if kind == "vin":
@@ -1907,7 +1927,8 @@ class Plugin:
         )
 
     def _collect_values(self) -> dict[str, str]:
-        return {field.field_name: field.get_value() for field in self._field_widgets}
+        values = {field.field_name: field.get_value() for field in self._field_widgets}
+        return synchronize_vin_values(values, self._current_placeholders)
 
     def _clear_after_generate_enabled(self) -> bool:
         """10.3.0: config `certificates.clear_after_generate` (standard True)."""
@@ -2135,20 +2156,25 @@ class Plugin:
         config = _safe_get(template, "config", None)
         validate_vin = bool(_safe_get(config, "validate_vin", True))
         validate_reg = bool(_safe_get(config, "validate_reg", False))
-        checks: tuple[tuple[set[str], Callable[[str], Any], str, bool], ...] = (
-            ({"VIN", "VINNUMMER", "CHASSI", "CHASSINUMMER"}, _VINValidator.validate, "Ogiltigt VIN", validate_vin),
-            ({"REG", "REGNR", "REGISTRERINGSNUMMER"}, _RegValidator.validate, "Ogiltigt registreringsnummer", validate_reg),
+        checks: tuple[tuple[Callable[[str], bool], Callable[[str], Any], str, bool], ...] = (
+            (is_vin_field_name, _VINValidator.validate, "Ogiltigt VIN", validate_vin),
+            (
+                lambda key: "".join(character for character in key.upper() if character.isalnum())
+                in {"REG", "REGNR", "REGISTRERINGSNUMMER"},
+                _RegValidator.validate,
+                "Ogiltigt registreringsnummer",
+                validate_reg,
+            ),
         )
         issues: list[str] = []
-        for names, validator, title, enabled in checks:
+        for matches_name, validator, title, enabled in checks:
             if not enabled:
                 continue
             value = next(
                 (
                     candidate
                     for key, candidate in values.items()
-                    if "".join(character for character in key.upper() if character.isalnum()) in names
-                    and candidate.strip()
+                    if matches_name(key) and candidate.strip()
                 ),
                 "",
             )
@@ -2571,7 +2597,7 @@ class Plugin:
                 "count": int(current(name)) if callable(current) else 0,
                 "next": int(next_number(name, start=start_number)) if callable(next_number) else start_number,
                 "valid": _template_is_valid(template),
-                "fields": len(_template_user_fields(template)),
+                "fields": len(collapse_vin_fields(_template_user_fields(template))),
                 "attachments": _template_attachments(template),
             }
         return data

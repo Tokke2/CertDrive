@@ -16,7 +16,7 @@ FIELD_GROUP_ORDER = (
 
 _VEHICLE_TERMS = (
     "fordon", "reg", "registr", "vin", "chassi", "fabrikat", "marke",
-    "modell", "arsmodell", "fordonsar", "vehicle", "make", "model", "year",
+    "modell", "arsmodell", "fordonsar", "identifik", "identifier", "vehicle", "make", "model", "year",
     "handelsbet", "commercialname", "tradename",
 )
 _CERTIFICATE_TERMS = (

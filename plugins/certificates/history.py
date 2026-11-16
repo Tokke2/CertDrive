@@ -8,8 +8,12 @@ _REGISTRATION_KEYS = frozenset({
     "reg", "regnr", "registreringsnummer", "registration", "registrationnumber",
 })
 _VIN_KEYS = frozenset({
-    "vin", "vinnummer", "chassi", "chassinummer", "chassisnumber",
-    "vehicleidentificationnumber",
+    "vin", "vinnummer", "vinno", "chassi", "chassinummer",
+    "chassisnumber", "identifikationsnummer", "identificationsnummer",
+    "identificationnumber", "identificationno", "identifieringsnummer",
+    "fordonsidentifikationsnummer",
+    "fordonsidentifieringsnummer", "vehicleidentificationnumber",
+    "vehicleidentificationno", "vehicleidnumber",
 })
 
 
@@ -20,6 +24,44 @@ def normalize_registration(value: Any) -> str:
 
 def _normalized_key(value: Any) -> str:
     return "".join(character for character in str(value).casefold() if character.isalnum())
+
+
+def is_vin_field_name(value: Any) -> bool:
+    """Return whether a placeholder denotes the vehicle identification number."""
+    return _normalized_key(value) in _VIN_KEYS
+
+
+def collapse_vin_fields(fields: Iterable[str]) -> list[str]:
+    """Show one editable field when a template names both VIN and its identifier alias."""
+    result: list[str] = []
+    has_vin_field = False
+    for field_name in fields:
+        if is_vin_field_name(field_name):
+            if has_vin_field:
+                continue
+            has_vin_field = True
+        result.append(str(field_name))
+    return result
+
+
+def synchronize_vin_values(
+    values: dict[str, Any], field_names: Iterable[str] = ()
+) -> dict[str, str]:
+    """Mirror the single VIN value to every equivalent template placeholder."""
+    result = {str(key): str(value or "") for key, value in values.items()}
+    candidates = sorted(
+        ((key, value) for key, value in result.items() if is_vin_field_name(key) and value.strip()),
+        key=lambda pair: (_normalized_key(pair[0]) != "vin",),
+    )
+    if not candidates:
+        return result
+    vin = candidates[0][1]
+    aliases = {key for key in result if is_vin_field_name(key)}
+    aliases.update(str(key) for key in field_names if is_vin_field_name(key))
+    aliases.add("VIN")
+    for alias in aliases:
+        result[alias] = vin
+    return result
 
 
 def registration_from_values(values: dict[str, Any]) -> str:

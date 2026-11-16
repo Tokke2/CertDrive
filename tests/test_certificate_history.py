@@ -15,6 +15,9 @@ find_duplicate_certificates = _HISTORY_MODULE.find_duplicate_certificates
 normalize_registration = _HISTORY_MODULE.normalize_registration
 registration_from_values = _HISTORY_MODULE.registration_from_values
 vin_from_values = _HISTORY_MODULE.vin_from_values
+is_vin_field_name = _HISTORY_MODULE.is_vin_field_name
+collapse_vin_fields = _HISTORY_MODULE.collapse_vin_fields
+synchronize_vin_values = _HISTORY_MODULE.synchronize_vin_values
 
 
 class CertificateHistoryDuplicateTests(unittest.TestCase):
@@ -48,6 +51,41 @@ class CertificateHistoryDuplicateTests(unittest.TestCase):
         )
         self.assertEqual([record["id"] for record in matches], [1])
         self.assertEqual(vin_from_values({"VIN nummer": "1HGCM82633A004352"}), "1HGCM82633A004352")
+
+    def test_vehicle_identification_number_is_a_vin_alias(self):
+        for field_name in (
+            "VIN",
+            "VIN-nummer",
+            "Identifikationsnummer",
+            "Identificationsnummer",
+            "Identifieringsnummer",
+            "Fordonsidentifikationsnummer",
+            "Vehicle Identification Number",
+            "Identification Number",
+        ):
+            self.assertTrue(is_vin_field_name(field_name), field_name)
+        self.assertFalse(is_vin_field_name("Registreringsnummer"))
+
+    def test_identification_and_vin_fields_collapse_and_share_one_value(self):
+        visible = collapse_vin_fields(
+            ["Identifikationsnummer", "VIN", "Registreringsnummer"]
+        )
+        self.assertEqual(visible, ["Identifikationsnummer", "Registreringsnummer"])
+        synchronized = synchronize_vin_values(
+            {"Identifikationsnummer": "1hgcm82633a004352"},
+            ["Identifikationsnummer", "VIN-nummer"],
+        )
+        self.assertEqual(synchronized["Identifikationsnummer"], "1hgcm82633a004352")
+        self.assertEqual(synchronized["VIN-nummer"], "1hgcm82633a004352")
+        self.assertEqual(synchronized["VIN"], "1hgcm82633a004352")
+        self.assertEqual(vin_from_values(synchronized), "1HGCM82633A004352")
+
+    def test_explicit_vin_value_wins_and_overwrites_conflicting_alias(self):
+        synchronized = synchronize_vin_values(
+            {"Identifikationsnummer": "OTHER", "VIN": "1HGCM82633A004352"},
+            ["Identifikationsnummer"],
+        )
+        self.assertEqual(synchronized["Identifikationsnummer"], "1HGCM82633A004352")
 
     def test_matches_by_registration_or_vin_once(self):
         record = {
