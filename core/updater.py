@@ -33,7 +33,18 @@ _STATE_NAME = "update_state.json"
 _PENDING_NAME = "pending.json"
 _APPROVED_NAME = "approved.json"
 _RUNTIME_DIRS = frozenset({"core", "plugins", "Icon"})
-_RUNTIME_ROOT_FILES = frozenset({"main.pyw", "main_guards.py", "requirements.txt"})
+_RUNTIME_ROOT_FILES = frozenset({
+    "main.pyw",
+    "main_guards.py",
+    "requirements.txt",
+    "Starta IntygsDrive.bat",
+    "Starta IntygsDrive.sh",
+    "Starta IntygsDrive.command",
+})
+_EXECUTABLE_RUNTIME_ROOT_FILES = frozenset({
+    "Starta IntygsDrive.sh",
+    "Starta IntygsDrive.command",
+})
 _RUNTIME_EXACT_FILES = frozenset({"core/python_weekly_update.ps1"})
 _RUNTIME_SUFFIXES = frozenset({".py", ".pyw", ".svg", ".png", ".ico"})
 
@@ -516,6 +527,8 @@ def run_update_helper(root: Path | str, parent_pid: int, *, wait_timeout: float 
             temporary = target.with_name(f".{target.name}.update-tmp")
             shutil.copy2(source, temporary)
             os.replace(temporary, target)
+            if os.name != "nt" and relative.name in _EXECUTABLE_RUNTIME_ROOT_FILES:
+                target.chmod(0o755)
         _record_installed_commit(app_root, release)
     except Exception as exc:
         for target, backup in reversed(changes):

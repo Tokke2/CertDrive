@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -120,6 +121,7 @@ class AutomaticUpdateStagingTests(unittest.TestCase):
                 "main.pyw": b"new main",
                 "core/module.py": b"new code",
                 "plugins/new_plugin.py": b"new plugin",
+                "Starta IntygsDrive.sh": b"#!/bin/sh\necho start\n",
                 "js/settings.json": b"attacker must not overwrite config",
                 "Mallar/kund.docx": b"attacker must not overwrite templates",
             })
@@ -139,6 +141,10 @@ class AutomaticUpdateStagingTests(unittest.TestCase):
             self.assertEqual((root / "main.pyw").read_text(encoding="utf-8"), "new main")
             self.assertEqual((root / "core" / "module.py").read_text(encoding="utf-8"), "new code")
             self.assertEqual((root / "plugins" / "new_plugin.py").read_text(encoding="utf-8"), "new plugin")
+            startup = root / "Starta IntygsDrive.sh"
+            self.assertEqual(startup.read_text(encoding="utf-8"), "#!/bin/sh\necho start\n")
+            if os.name != "nt":
+                self.assertTrue(startup.stat().st_mode & 0o111)
             self.assertEqual((root / "js" / "settings.json").read_text(encoding="utf-8"), '{"keep": true}')
             self.assertEqual((root / "Mallar" / "kund.docx").read_bytes(), b"user template")
             self.assertEqual(get_current_commit(root), "a" * 40)
@@ -220,6 +226,15 @@ class AutomaticUpdateStagingTests(unittest.TestCase):
 
     def test_print_ready_logo_is_part_of_the_app_release_runtime(self):
         self.assertTrue(_is_runtime_path(PurePosixPath("Icon/logo.svg")))
+
+    def test_multi_os_start_files_are_in_runtime_allowlist(self):
+        for name in (
+            "Starta IntygsDrive.bat",
+            "Starta IntygsDrive.sh",
+            "Starta IntygsDrive.command",
+        ):
+            self.assertTrue(_is_runtime_path(PurePosixPath(name)))
+        self.assertFalse(_is_runtime_path(PurePosixPath("Installera senaste Python.bat")))
 
     def test_legacy_python_task_cleanup_shim_is_allowlisted(self):
         self.assertTrue(_is_runtime_path(PurePosixPath("requirements.txt")))
